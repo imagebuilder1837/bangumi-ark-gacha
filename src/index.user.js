@@ -1,14 +1,17 @@
 // ==UserScript==
 // @name         Bangumi 随机收藏条目扭蛋机（仿粥版本）
-// @namespace    bangumi-ark-gacha
-// @version      0.1.1
-// @description  持久化缓存、全量分页同步、评分分级与三连/十连抽卡
-// @match        *://bgm.tv/*/list/*
-// @match        *://bangumi.tv/*/list/*
-// @match        *://chii.in/*/list/*
-// @grant        none
+// @namespace    https://github.com/imagebuilder1837/bangumi-ark-gacha
+// @version      0.1.2
+// @description  像方舟抽卡一样随机抽取 Bangumi 收藏条目。
+// @author       imagebuilder1837
+// @match        https://bgm.tv/*/list/*
+// @match        https://bangumi.tv/*/list/*
+// @match        https://chii.in/*/list/*
 // @run-at       document-idle
+// @grant        none
 // @license      MIT
+// @downloadURL  https://raw.githubusercontent.com/imagebuilder1837/bangumi-ark-gacha/refs/heads/main/src/index.user.js
+// @updateURL    https://raw.githubusercontent.com/imagebuilder1837/bangumi-ark-gacha/refs/heads/main/src/index.user.js
 // ==/UserScript==
 
 (function () {

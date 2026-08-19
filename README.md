@@ -1,6 +1,6 @@
 # Bangumi 随机收藏条目扭蛋机（仿粥版本）
 
-随机抽取 Bangumi 收藏条目。
+像方舟抽卡一样随机抽取 Bangumi 收藏条目。
 
 ## 效果
 
@@ -11,9 +11,10 @@
 - 本地持久化条目缓存
 - 抽取时直观显示条目评分
 
-## [安装](https://raw.githubusercontent.com/imagebuilder1837/bangumi-ark-gacha/refs/heads/main/src/index.user.js)
+## 安装
 
-需要浏览器装有 [Tampermonkey](https://tampermonkey.net/) 或 [Violentmonkey](https://violentmonkey.github.io/) 插件。
+1. 可以通过[这个链接](https://bgm.tv/dev/app/6923)在 Bangumi 组件页面启用。
+2. 也可以通过[这个链接](https://raw.githubusercontent.com/imagebuilder1837/bangumi-ark-gacha/refs/heads/main/src/index.user.js)安装到常见的脚本管理器，需要浏览器装有 [Tampermonkey](https://tampermonkey.net/) 或 [Violentmonkey](https://violentmonkey.github.io/) 插件。
 
 ## 致谢
 
