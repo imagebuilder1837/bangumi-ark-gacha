@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bangumi 随机收藏条目扭蛋机（仿粥版本）
 // @namespace    https://github.com/imagebuilder1837/bangumi-ark-gacha
-// @version      0.1.2
+// @version      0.1.3
 // @description  像方舟抽卡一样随机抽取 Bangumi 收藏条目。
 // @author       imagebuilder1837
 // @match        https://bgm.tv/*/list/*
@@ -375,14 +375,14 @@
         .ark-gacha-tab.active { border-bottom-color: #f09199; font-weight: 700; }
         .ark-gacha-result-grid {
             display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px;
-            width: 100%; min-height: 380px; box-sizing: border-box; padding: 4px;
+            width: 100%; box-sizing: border-box; padding: 4px; align-content: start; align-items: start;
         }
         .ark-gacha-result-grid.ten-gacha {
             grid-template-columns: repeat(5, minmax(0, 1fr)); grid-template-rows: repeat(2, auto);
         }
         .ark-gacha-message {
             grid-column: 1 / -1; display: flex; align-items: center; justify-content: center;
-            min-height: 300px; padding: 40px 0; color: #aaa; font-size: 14px; text-align: center;
+            box-sizing: border-box; min-height: 300px; padding: 40px 0; color: #aaa; font-size: 14px; text-align: center;
         }
         .ark-gacha-card {
             position: relative; display: flex; flex-direction: column; overflow: hidden;
@@ -501,8 +501,9 @@
         @media (max-width: 600px) {
             .ark-gacha-launcher { right: 18px; bottom: 72px; width: 52px; height: 52px; }
             .ark-gacha-modal { width: 96%; max-height: 90vh; padding: 16px; }
-            .ark-gacha-result-grid { gap: 8px; min-height: 230px; }
+            .ark-gacha-result-grid { gap: 8px; }
             .ark-gacha-result-grid.ten-gacha { gap: 6px; }
+            .ark-gacha-message { min-height: 230px; padding: 20px 0; }
             .ark-gacha-title { min-height: calc(2.4em + 8px); padding: 4px 2px; font-size: 10px; }
             .ark-gacha-score { padding: 2px; font-size: 9px; }
             .ark-gacha-footer { flex-direction: column; align-items: stretch; margin-top: 16px; }
