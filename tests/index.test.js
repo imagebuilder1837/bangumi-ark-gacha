@@ -23,7 +23,7 @@ class Element {
   querySelectorAll(selector) { return selector === '.ark-gacha-tab' ? (this.tabs ?? []) : []; }
 }
 
-function setup() {
+function setup({ ignoreAbort = false } = {}) {
   const source = fs.readFileSync('src/index.user.js', 'utf8');
   const data = new Map();
   const context = vm.createContext({
@@ -58,7 +58,7 @@ function setup() {
   const requests = [];
   app.fetchListPage = (status, page, signal) => new Promise((resolve, reject) => {
     requests.push({ status, page, signal, resolve });
-    signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+    if (!ignoreAbort) signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
   });
   return { app, requests };
 }
@@ -149,6 +149,25 @@ test('stale validation cannot hide the progress of a manual refresh', async () =
   requests[2].resolve({ items: [], pageInfo: { reliable: true, totalPages: 1 } });
   await flush();
   assert.equal(app.ui.progressWrap.hidden, true);
+  assert.equal(app.ui.progress.textContent, '✅ 全量刷新完成');
+});
+
+test('a late validation network failure cannot overwrite manual refresh progress', async () => {
+  const { app, requests } = setup({ ignoreAbort: true });
+  app.launcher.click();
+  await flush();
+  requests[0].resolve({ items: [], pageInfo: { reliable: true, totalPages: 1 } });
+  await flush();
+  app.ui.refresh.click();
+  await flush();
+  assert.equal(requests[1].signal.aborted, true);
+  assert.equal(requests.length, 3);
+  requests[1].resolve(Promise.reject(new Error('late network failure')));
+  await flush();
+  assert.match(app.ui.progress.textContent, /同步 \[想看\] 第 1 页/);
+  assert.equal(app.ui.progressWrap.hidden, false);
+  requests[2].resolve({ items: [], pageInfo: { reliable: true, totalPages: 1 } });
+  await flush();
   assert.equal(app.ui.progress.textContent, '✅ 全量刷新完成');
 });
 

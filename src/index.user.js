@@ -941,6 +941,7 @@
             controller.signal,
             true,
           );
+          if (controller.signal.aborted || !this.isActive(flowId)) return;
           const snapshot = firstPageSnapshot(remote.items);
           const sameAsAccepted = snapshot.fingerprint === meta.fingerprint;
 
@@ -964,7 +965,7 @@
           this.setStatus("✅ 最新第一页核验完成");
         }
       } catch (error) {
-        if (error.name !== "AbortError") {
+        if (this.isActive(flowId) && error.name !== "AbortError") {
           this.addLog(`后台核验失败：${error.message}`, true);
           this.setStatus("后台核验失败，继续使用本地缓存", true);
         }
