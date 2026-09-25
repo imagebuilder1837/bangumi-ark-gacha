@@ -555,7 +555,7 @@
       launcher.title = "打开收藏扭蛋机";
       launcher.addEventListener("click", () => {
         this.toggleModal(true);
-        if (!this.loaded) this.loadView();
+        if (!this.loaded && !this.busy) this.loadView();
       });
       document.body.appendChild(launcher);
       this.launcher = launcher;
@@ -656,6 +656,7 @@
     }
 
     stopOperations(showMessage = true) {
+      ++this.flowId;
       if (this.abortController) this.abortController.abort();
       if (this.drawAbortController) this.drawAbortController.abort();
       this.abortController = null;
@@ -747,8 +748,8 @@
     }
 
     async loadView() {
-      const flowId = ++this.flowId;
       this.stopOperations(false);
+      const flowId = this.flowId;
       this.pendingChanges = [];
       this.hideConfirm();
       this.clearLogs();
@@ -769,10 +770,11 @@
       if (this.pool.length > 0)
         this.setResultMessage("缓存已载入，正在后台核验最新第一页...");
 
+      let controller = null;
       try {
         if (missing.length) {
           this.setStatus("首次使用，开始全量同步...");
-          const controller = this.createController();
+          controller = this.createController();
           await this.syncStatuses(missing, {
             signal: controller.signal,
             manual: false,
@@ -795,6 +797,7 @@
 
         if (this.isActive(flowId)) this.startValidation(statuses, flowId);
       } catch (error) {
+        if (!this.isActive(flowId)) return;
         if (error.name === "AbortError") {
           this.setStatus("已停止同步", true);
         } else {
@@ -808,8 +811,7 @@
         this.ui.progressWrap.hidden = true;
         this.updateButtons();
       } finally {
-        if (this.abortController && this.abortController.signal.aborted)
-          this.abortController = null;
+        if (this.abortController === controller) this.abortController = null;
       }
     }
 
@@ -921,6 +923,7 @@
     async startValidation(statuses, flowId) {
       if (!this.isActive(flowId) || this.busy) return;
       const controller = this.createController();
+      this.ui.progressWrap.hidden = false;
       const changes = [];
 
       try {
@@ -1021,6 +1024,7 @@
             flowId,
           },
         );
+        if (!this.isActive(flowId)) return;
         this.loaded = true;
         this.ui.progressWrap.hidden = true;
         this.setResultMessage("✅ 变化状态已更新，可以继续抽卡");
@@ -1059,6 +1063,7 @@
           flowId,
         });
         await this.loadPool(statuses);
+        if (!this.isActive(flowId)) return;
         this.loaded = true;
         this.setResultMessage(
           this.pool.length ? "✅ 全量刷新完成，可以抽卡" : "该收藏状态暂无条目",
