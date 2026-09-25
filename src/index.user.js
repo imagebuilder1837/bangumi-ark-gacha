@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bangumi 随机收藏条目扭蛋机（仿粥版本）
 // @namespace    https://github.com/imagebuilder1837/bangumi-ark-gacha
-// @version      0.1.3
+// @version      0.1.4
 // @description  像方舟抽卡一样随机抽取 Bangumi 收藏条目。
 // @author       imagebuilder1837
 // @match        https://bgm.tv/*/list/*
