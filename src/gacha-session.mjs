@@ -55,6 +55,8 @@ export class GachaSession {
     this.tasks = new Map();
     this.checking = new Set();
     this.checkGeneration = new Map();
+    this.checkControllers = new Map();
+    this.listQueue = Promise.resolve();
     this.view = createView(this);
   }
 
@@ -84,6 +86,11 @@ export class GachaSession {
     )
       return;
     ++this.selectionId;
+    for (const task of this.tasks.values()) task.controller.abort();
+    this.tasks.clear();
+    for (const controller of this.checkControllers.values()) controller.abort();
+    this.checkControllers.clear();
+    this.checking.clear();
     this.busy = false;
     this.currentStatus = status;
     this.view.selectStatus(status);
@@ -108,20 +115,27 @@ export class GachaSession {
       else this.checkStatus(status, selection);
     }
   }
+  fetchPage(status, page, signal) {
+    const request = this.listQueue
+      .catch(() => {})
+      .then(() => {
+        if (signal.aborted)
+          throw Object.assign(new Error("Aborted"), { name: "AbortError" });
+        return this.client.fetchListPage(status, page, signal, true);
+      });
+    this.listQueue = request.catch(() => {});
+    return request;
+  }
   async checkStatus(status, selection) {
     if (this.checking.has(status) || this.tasks.has(status)) return;
     this.checking.add(status);
     const generation = this.checkGeneration.get(status) || 0;
     const controller = new AbortController();
+    this.checkControllers.set(status, controller);
     try {
       this.view.setProgressVisible(true);
       this.view.setStatus(`核验 [${this.statusLabels[status]}] 最新第一页...`);
-      const remote = await this.client.fetchListPage(
-        status,
-        1,
-        controller.signal,
-        true,
-      );
+      const remote = await this.fetchPage(status, 1, controller.signal);
       const meta = this.storage.getMeta(status);
       if (generation !== (this.checkGeneration.get(status) || 0)) return;
       if (meta && firstPageFingerprint(remote.items) !== meta.fingerprint)
@@ -132,7 +146,10 @@ export class GachaSession {
       if (generation === (this.checkGeneration.get(status) || 0))
         this.reportFailure(status, selection, error);
     } finally {
-      this.checking.delete(status);
+      if (this.checkControllers.get(status) === controller) {
+        this.checkControllers.delete(status);
+        this.checking.delete(status);
+      }
       if (!this.tasks.size && !this.checking.size)
         this.view.setProgressVisible(false);
     }
@@ -150,7 +167,8 @@ export class GachaSession {
     task.promise = (async () => {
       try {
         const result = await this.fetchAllStatus(status, controller.signal);
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || this.tasks.get(status) !== task)
+          return;
         this.storage.commitStatus(status, result.items, {
           version: 2,
           totalPages: result.totalPages,
@@ -172,7 +190,7 @@ export class GachaSession {
             );
         }
       } catch (error) {
-        if (error.name !== "AbortError")
+        if (error.name !== "AbortError" && this.tasks.get(status) === task)
           this.reportFailure(status, task.selection, error);
       } finally {
         if (this.tasks.get(status) === task) this.tasks.delete(status);
@@ -200,7 +218,7 @@ export class GachaSession {
   async fetchAllStatus(status, signal) {
     const name = this.statusLabels[status];
     this.view.setStatus(`同步 [${name}] 第 1 页...`);
-    const first = await this.client.fetchListPage(status, 1, signal, true);
+    const first = await this.fetchPage(status, 1, signal);
     const allItems = [...first.items];
     const signatures = new Set([firstPageFingerprint(first.items)]);
     const { totalPages, reliable } = first.pageInfo;
@@ -215,12 +233,7 @@ export class GachaSession {
       this.view.setStatus(
         `同步 [${name}] 第 ${page}${reliable ? `/${totalPages}` : ""} 页...`,
       );
-      const result = await this.client.fetchListPage(
-        status,
-        page,
-        signal,
-        true,
-      );
+      const result = await this.fetchPage(status, page, signal);
       if (!result.items.length) {
         if (reliable && page < totalPages)
           throw new Error(`第 ${page} 页为空，分页数据可能不完整`);
@@ -243,9 +256,14 @@ export class GachaSession {
   }
   async forceRefresh() {
     this.view.hideConfirm();
-    return Promise.all(
-      this.targetStatuses().map((status) => this.startTask(status)),
-    );
+    for (const status of this.targetStatuses()) {
+      const active = this.tasks.get(status);
+      if (active) {
+        active.controller.abort();
+        this.tasks.delete(status);
+      }
+      this.startTask(status);
+    }
   }
   async draw(count) {
     if (this.busy || !this.complete || this.pool.length < count) return;

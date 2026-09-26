@@ -17,6 +17,7 @@ export class DrawEngine {
     if (
       !cached ||
       cached.version !== SUBJECT_CACHE_VERSION ||
+      cached.resolved !== true ||
       !Number.isFinite(cached.fetchedAt) ||
       cached.fetchedAt < 0
     )
