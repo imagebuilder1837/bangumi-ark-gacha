@@ -249,11 +249,10 @@ export class GachaView {
                         <div class="ark-gacha-info-area">
                             <div class="ark-gacha-pool-box">
                                 <span class="ark-gacha-pool-info" id="ark-gacha-info">POOL: 0</span>
-                                <button type="button" class="ark-gacha-refresh-btn" id="ark-gacha-refresh" title="清空当前类型/标签缓存并全量刷新">🔄</button>
+                                <button type="button" class="ark-gacha-refresh-btn" id="ark-gacha-refresh" title="全量更新当前收藏范围">🔄</button>
                             </div>
                             <div class="ark-gacha-progress-wrap" id="ark-gacha-progress-wrap" hidden>
                                 <span class="ark-gacha-progress" id="ark-gacha-progress">准备同步...</span>
-                                <button type="button" class="ark-gacha-mini-btn" id="ark-gacha-stop">停止</button>
                             </div>
                             <div class="ark-gacha-logs" id="ark-gacha-logs"></div>
                         </div>
@@ -273,7 +272,6 @@ export class GachaView {
       refresh: mask.querySelector("#ark-gacha-refresh"),
       progressWrap: mask.querySelector("#ark-gacha-progress-wrap"),
       progress: mask.querySelector("#ark-gacha-progress"),
-      stop: mask.querySelector("#ark-gacha-stop"),
       logs: mask.querySelector("#ark-gacha-logs"),
       confirm: mask.querySelector("#ark-gacha-confirm"),
       run3: mask.querySelector("#ark-gacha-run-3"),
@@ -291,7 +289,6 @@ export class GachaView {
     this.ui.refresh.addEventListener("click", () =>
       this.session.forceRefresh(),
     );
-    this.ui.stop.addEventListener("click", () => this.session.stopOperations());
     this.ui.run3.addEventListener("click", () => this.session.draw(3));
     this.ui.run10.addEventListener("click", () => this.session.draw(10));
   }
@@ -322,6 +319,13 @@ export class GachaView {
   clearLogs() {
     this.logs = [];
     this.ui.logs.replaceChildren();
+  }
+
+  hasResultMessage() {
+    return (
+      Boolean(this.ui.result.querySelector(".ark-gacha-message")) &&
+      !this.session.busy
+    );
   }
 
   setResultMessage(message) {
@@ -360,10 +364,10 @@ export class GachaView {
   }
 
   updateButtons() {
-    const disabled = this.session.busy || this.session.pool.length === 0;
+    const disabled = this.session.busy || !this.session.complete;
     this.ui.run3.disabled = disabled || this.session.pool.length < 3;
     this.ui.run10.disabled = disabled || this.session.pool.length < 10;
-    this.ui.refresh.disabled = this.session.busy;
+    this.ui.refresh.disabled = false;
   }
 
   setProgressVisible(visible) {
@@ -406,24 +410,24 @@ export class GachaView {
     this.ui.confirm.replaceChildren();
   }
 
-  showConfirm(changes) {
-    const names = changes
-      .map((change) => this.session.statusLabels[change.status])
-      .join("、");
+  showFailure(canUseCache) {
     this.ui.confirm.hidden = false;
     this.ui.confirm.innerHTML = `
-                <span>检测到 ${escapeHtml(names)} 的第一页发生变化，是否全量更新？</span>
+                <span>当前范围获取失败，请选择后续操作</span>
                 <span class="ark-gacha-confirm-actions">
-                    <button type="button" data-action="keep">继续使用缓存</button>
+                    ${canUseCache ? '<button type="button" data-action="keep">继续使用缓存</button>' : ""}
                     <button type="button" class="primary" data-action="refresh">全量更新</button>
                 </span>
             `;
     this.ui.confirm
       .querySelector('[data-action="keep"]')
-      .addEventListener("click", () => this.session.keepCachedChanges());
+      ?.addEventListener("click", () => this.hideConfirm());
     this.ui.confirm
       .querySelector('[data-action="refresh"]')
-      .addEventListener("click", () => this.session.refreshDetectedChanges());
+      .addEventListener("click", () => {
+        this.hideConfirm();
+        this.session.forceRefresh();
+      });
   }
 
   createCard(data) {

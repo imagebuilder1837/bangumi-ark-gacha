@@ -1,51 +1,89 @@
-import { uniqueItems } from "./shared.mjs";
+import { uniqueItems, STATUS_IDS } from "./shared.mjs";
 const STORAGE_PREFIX = "bangumi-ark-gacha";
+
+function validItems(items) {
+  return (
+    Array.isArray(items) &&
+    items.every(
+      (item) =>
+        item &&
+        typeof item === "object" &&
+        /^\d+$/.test(String(item.id)) &&
+        typeof item.title === "string" &&
+        typeof item.link === "string" &&
+        item.link.includes(`/subject/${item.id}`),
+    )
+  );
+}
+function validMeta(meta) {
+  return (
+    meta &&
+    typeof meta === "object" &&
+    typeof meta.fingerprint === "string" &&
+    Number.isInteger(meta.totalPages) &&
+    meta.totalPages >= 1
+  );
+}
+
 export class GachaStorage {
   constructor(userId, subjectType, storage = localStorage) {
     this.storage = storage;
     this.userId = String(userId);
     this.subjectType = String(subjectType);
   }
-
   listKey(status) {
     return `${STORAGE_PREFIX}:list:${this.userId}:${this.subjectType}:${status}`;
   }
-
   metaKey(status) {
     return `${STORAGE_PREFIX}:meta:${this.userId}:${this.subjectType}:${status}`;
   }
-
+  recordKey(status) {
+    return `${STORAGE_PREFIX}:record:${this.userId}:${this.subjectType}:${status}`;
+  }
   subjectKey(subjectId) {
     return `${STORAGE_PREFIX}:subject:${subjectId}`;
   }
-
   readJson(key, fallback) {
     try {
       const raw = this.storage.getItem(key);
       return raw == null ? fallback : JSON.parse(raw);
-    } catch (error) {
+    } catch {
       return fallback;
     }
   }
-
   writeJson(key, value) {
     this.storage.setItem(key, JSON.stringify(value));
   }
-
-  getItems(status) {
-    return uniqueItems(this.readJson(this.listKey(status), []));
-  }
-
-  getMeta(status) {
+  getStatus(status) {
+    if (!STATUS_IDS.includes(status)) return null;
+    const record = this.readJson(this.recordKey(status), null);
+    if (record !== null) {
+      return validItems(record?.items) && validMeta(record?.meta)
+        ? record
+        : null;
+    }
+    // Old installations stored list and metadata separately. Only migrate a complete pair.
+    const items = this.readJson(this.listKey(status), null);
     const meta = this.readJson(this.metaKey(status), null);
-    return meta && typeof meta === "object" ? meta : null;
+    if (!validItems(items) || !validMeta(meta)) return null;
+    const migrated = { items: uniqueItems(items), meta };
+    try {
+      this.writeJson(this.recordKey(status), migrated);
+    } catch {
+      /* retry on next read */
+    }
+    return migrated;
   }
-
+  getItems(status) {
+    return this.getStatus(status)?.items || [];
+  }
+  getMeta(status) {
+    return this.getStatus(status)?.meta || null;
+  }
   getSubjectMeta(subjectId) {
     const meta = this.readJson(this.subjectKey(subjectId), null);
     return meta && typeof meta === "object" ? meta : null;
   }
-
   saveSubjectMeta(subjectId, meta) {
     try {
       this.writeJson(this.subjectKey(subjectId), meta);
@@ -53,35 +91,10 @@ export class GachaStorage {
       console.warn("[Bangumi Ark Gacha] 评分缓存写入失败", error);
     }
   }
-
-  clearSubjectMeta(subjectIds) {
-    const ids = new Set((subjectIds || []).map(String).filter(Boolean));
-    ids.forEach((id) => this.storage.removeItem(this.subjectKey(id)));
-  }
-
   commitStatus(status, items, meta) {
-    const listKey = this.listKey(status);
-    const metaKey = this.metaKey(status);
-    const listTempKey = `${listKey}:tmp`;
-    const metaTempKey = `${metaKey}:tmp`;
-    const oldList = this.storage.getItem(listKey);
-    const oldMeta = this.storage.getItem(metaKey);
-
-    try {
-      this.writeJson(listTempKey, uniqueItems(items));
-      this.writeJson(metaTempKey, meta);
-      this.storage.setItem(listKey, this.storage.getItem(listTempKey));
-      this.storage.setItem(metaKey, this.storage.getItem(metaTempKey));
-      this.storage.removeItem(listTempKey);
-      this.storage.removeItem(metaTempKey);
-    } catch (error) {
-      if (oldList == null) this.storage.removeItem(listKey);
-      else this.storage.setItem(listKey, oldList);
-      if (oldMeta == null) this.storage.removeItem(metaKey);
-      else this.storage.setItem(metaKey, oldMeta);
-      this.storage.removeItem(listTempKey);
-      this.storage.removeItem(metaTempKey);
-      throw error;
-    }
+    if (!STATUS_IDS.includes(status) || !validItems(items) || !validMeta(meta))
+      throw new Error("收藏缓存数据无效");
+    // A single key is the publication point; an unsuccessful setItem leaves the old record intact.
+    this.writeJson(this.recordKey(status), { items: uniqueItems(items), meta });
   }
 }

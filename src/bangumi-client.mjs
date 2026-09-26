@@ -159,7 +159,12 @@ export function pageInfo(doc, origin) {
 }
 
 export function parseListPage(doc, origin) {
-  return Array.from(doc.querySelectorAll("#browserItemList li.item"))
+  if (!doc.querySelector("#browserItemList"))
+    throw new Error("收藏列表结构无效");
+  const entries = Array.from(doc.querySelectorAll("#browserItemList li.item"));
+  if (entries.some((li) => !li.querySelector("h3 a[href*='/subject/']")))
+    throw new Error("收藏条目结构无效");
+  return entries
     .map((li) => {
       const linkElement = li.querySelector("h3 a");
       if (!linkElement) return null;

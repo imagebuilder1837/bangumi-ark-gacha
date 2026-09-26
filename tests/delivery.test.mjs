@@ -4,20 +4,35 @@ import { readFile } from "node:fs/promises";
 import { environment, flush } from "./support/session.mjs";
 import { GachaStorage } from "../src/collection-cache.mjs";
 
-test("generated IIFE validates changed cache, refreshes and renders drawn cards", async () => {
+test("generated IIFE draws from old cache while changed status publishes in the background", async () => {
   const source = await readFile("src/index.user.js", "utf8");
   const dom = environment();
   const storage = new GachaStorage("test", "anime");
   storage.commitStatus(
     "wish",
-    [{ id: "1", title: "旧条目", link: "/subject/1", cover: "" }],
-    { fingerprint: "old" },
+    [1, 2, 3].map((id) => ({
+      id: String(id),
+      title: `旧条目${id}`,
+      link: `/subject/${id}`,
+      cover: "",
+    })),
+    { fingerprint: "old", totalPages: 1 },
   );
   const requests = [];
+  let releaseUpdate;
+  const updateGate = new Promise((resolve) => {
+    releaseUpdate = resolve;
+  });
   const list = (title) =>
     `<ul id="browserItemList">${[1, 2, 3].map((id) => `<li class="item"><h3><a href="/subject/${id}">${title}${id}</a></h3></li>`).join("")}</ul><div class="p_edge">1 / 1</div>`;
   dom.window.fetch = async (url) => {
     requests.push(url);
+    if (
+      url.startsWith("/anime/list/") &&
+      requests.filter((request) => request.startsWith("/anime/list/"))
+        .length === 2
+    )
+      await updateGate;
     return {
       ok: true,
       text: async () =>
@@ -30,13 +45,18 @@ test("generated IIFE validates changed cache, refreshes and renders drawn cards"
   await flush();
   document.querySelector(".ark-gacha-launcher").click();
   await flush();
-  assert.equal(document.querySelector("#ark-gacha-confirm").hidden, false);
-  document.querySelector('[data-action="refresh"]').click();
-  await flush();
-  assert.equal(storage.getItems("wish").length, 3);
+  assert.equal(document.querySelector("#ark-gacha-confirm").hidden, true);
+  assert.equal(document.querySelector("#ark-gacha-run-3").disabled, false);
   document.querySelector("#ark-gacha-run-3").click();
   await new Promise((resolve) => setTimeout(resolve, 700));
+  assert.equal(storage.getItems("wish")[0].title, "旧条目1");
   assert.equal(document.querySelectorAll(".ark-gacha-card").length, 3);
+  assert.match(document.querySelector(".ark-gacha-card").textContent, /旧条目/);
+  releaseUpdate();
+  await flush();
+  assert.equal(storage.getItems("wish")[0].title, "新条目1");
+  document.querySelector("#ark-gacha-run-3").click();
+  await new Promise((resolve) => setTimeout(resolve, 700));
   assert.match(document.querySelector(".ark-gacha-card").textContent, /新条目/);
   assert.match(
     document.querySelector(".ark-gacha-card").textContent,

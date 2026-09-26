@@ -1,6 +1,6 @@
 import { subjectIdFromLink } from "./shared.mjs";
 
-const SCORE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const SCORE_TTL_MS = 72 * 60 * 60 * 1000;
 const SUBJECT_CACHE_VERSION = 3;
 export class DrawEngine {
   constructor({
@@ -17,10 +17,12 @@ export class DrawEngine {
     if (
       !cached ||
       cached.version !== SUBJECT_CACHE_VERSION ||
-      !cached.fetchedAt
+      !Number.isFinite(cached.fetchedAt) ||
+      cached.fetchedAt < 0
     )
       return null;
-    return this.now() - cached.fetchedAt <= SCORE_TTL_MS ? cached : null;
+    const age = this.now() - cached.fetchedAt;
+    return age >= 0 && age < SCORE_TTL_MS ? cached : null;
   }
 
   async getSubjectInfo(subjectId, signal) {
@@ -35,7 +37,7 @@ export class DrawEngine {
         fetchedAt: this.now(),
         ...subjectResult,
       };
-      this.storage.saveSubjectMeta(subjectId, stored);
+      if (stored.resolved) this.storage.saveSubjectMeta(subjectId, stored);
       return stored;
     } catch (error) {
       if (error.name === "AbortError") throw error;

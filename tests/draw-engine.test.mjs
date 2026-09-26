@@ -4,7 +4,7 @@ import { GachaStorage } from "../src/collection-cache.mjs";
 import { DrawEngine } from "../src/draw-engine.mjs";
 import { browser } from "./support/browser.mjs";
 
-test("score cache is reused until the original seven-day boundary", async () => {
+test("score cache expires exactly 72 hours after its original fetch", async () => {
   const dom = browser();
   let now = Date.parse("2026-01-01T00:00:00Z");
   let calls = 0;
@@ -32,7 +32,7 @@ test("score cache is reused until the original seven-day boundary", async () => 
   });
   const item = { id: "21", title: "试验", link: "/subject/21" };
   assert.equal((await engine.cards([item], 1))[0].star, 5);
-  now += 7 * 24 * 60 * 60 * 1000;
+  now += 72 * 60 * 60 * 1000 - 1;
   await engine.cards([item], 1);
   assert.equal(calls, 1);
   now++;

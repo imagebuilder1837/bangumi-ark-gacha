@@ -96,52 +96,90 @@
   }
 
   const STORAGE_PREFIX = "bangumi-ark-gacha";
+
+  function validItems(items) {
+    return (
+      Array.isArray(items) &&
+      items.every(
+        (item) =>
+          item &&
+          typeof item === "object" &&
+          /^\d+$/.test(String(item.id)) &&
+          typeof item.title === "string" &&
+          typeof item.link === "string" &&
+          item.link.includes(`/subject/${item.id}`),
+      )
+    );
+  }
+  function validMeta(meta) {
+    return (
+      meta &&
+      typeof meta === "object" &&
+      typeof meta.fingerprint === "string" &&
+      Number.isInteger(meta.totalPages) &&
+      meta.totalPages >= 1
+    );
+  }
+
   class GachaStorage {
     constructor(userId, subjectType, storage = localStorage) {
       this.storage = storage;
       this.userId = String(userId);
       this.subjectType = String(subjectType);
     }
-
     listKey(status) {
       return `${STORAGE_PREFIX}:list:${this.userId}:${this.subjectType}:${status}`;
     }
-
     metaKey(status) {
       return `${STORAGE_PREFIX}:meta:${this.userId}:${this.subjectType}:${status}`;
     }
-
+    recordKey(status) {
+      return `${STORAGE_PREFIX}:record:${this.userId}:${this.subjectType}:${status}`;
+    }
     subjectKey(subjectId) {
       return `${STORAGE_PREFIX}:subject:${subjectId}`;
     }
-
     readJson(key, fallback) {
       try {
         const raw = this.storage.getItem(key);
         return raw == null ? fallback : JSON.parse(raw);
-      } catch (error) {
+      } catch {
         return fallback;
       }
     }
-
     writeJson(key, value) {
       this.storage.setItem(key, JSON.stringify(value));
     }
-
-    getItems(status) {
-      return uniqueItems(this.readJson(this.listKey(status), []));
-    }
-
-    getMeta(status) {
+    getStatus(status) {
+      if (!STATUS_IDS.includes(status)) return null;
+      const record = this.readJson(this.recordKey(status), null);
+      if (record !== null) {
+        return validItems(record?.items) && validMeta(record?.meta)
+          ? record
+          : null;
+      }
+      // Old installations stored list and metadata separately. Only migrate a complete pair.
+      const items = this.readJson(this.listKey(status), null);
       const meta = this.readJson(this.metaKey(status), null);
-      return meta && typeof meta === "object" ? meta : null;
+      if (!validItems(items) || !validMeta(meta)) return null;
+      const migrated = { items: uniqueItems(items), meta };
+      try {
+        this.writeJson(this.recordKey(status), migrated);
+      } catch {
+        /* retry on next read */
+      }
+      return migrated;
     }
-
+    getItems(status) {
+      return this.getStatus(status)?.items || [];
+    }
+    getMeta(status) {
+      return this.getStatus(status)?.meta || null;
+    }
     getSubjectMeta(subjectId) {
       const meta = this.readJson(this.subjectKey(subjectId), null);
       return meta && typeof meta === "object" ? meta : null;
     }
-
     saveSubjectMeta(subjectId, meta) {
       try {
         this.writeJson(this.subjectKey(subjectId), meta);
@@ -149,36 +187,18 @@
         console.warn("[Bangumi Ark Gacha] 评分缓存写入失败", error);
       }
     }
-
-    clearSubjectMeta(subjectIds) {
-      const ids = new Set((subjectIds || []).map(String).filter(Boolean));
-      ids.forEach((id) => this.storage.removeItem(this.subjectKey(id)));
-    }
-
     commitStatus(status, items, meta) {
-      const listKey = this.listKey(status);
-      const metaKey = this.metaKey(status);
-      const listTempKey = `${listKey}:tmp`;
-      const metaTempKey = `${metaKey}:tmp`;
-      const oldList = this.storage.getItem(listKey);
-      const oldMeta = this.storage.getItem(metaKey);
-
-      try {
-        this.writeJson(listTempKey, uniqueItems(items));
-        this.writeJson(metaTempKey, meta);
-        this.storage.setItem(listKey, this.storage.getItem(listTempKey));
-        this.storage.setItem(metaKey, this.storage.getItem(metaTempKey));
-        this.storage.removeItem(listTempKey);
-        this.storage.removeItem(metaTempKey);
-      } catch (error) {
-        if (oldList == null) this.storage.removeItem(listKey);
-        else this.storage.setItem(listKey, oldList);
-        if (oldMeta == null) this.storage.removeItem(metaKey);
-        else this.storage.setItem(metaKey, oldMeta);
-        this.storage.removeItem(listTempKey);
-        this.storage.removeItem(metaTempKey);
-        throw error;
-      }
+      if (
+        !STATUS_IDS.includes(status) ||
+        !validItems(items) ||
+        !validMeta(meta)
+      )
+        throw new Error("收藏缓存数据无效");
+      // A single key is the publication point; an unsuccessful setItem leaves the old record intact.
+      this.writeJson(this.recordKey(status), {
+        items: uniqueItems(items),
+        meta,
+      });
     }
   }
 
@@ -346,7 +366,14 @@
   }
 
   function parseListPage(doc, origin) {
-    return Array.from(doc.querySelectorAll("#browserItemList li.item"))
+    if (!doc.querySelector("#browserItemList"))
+      throw new Error("收藏列表结构无效");
+    const entries = Array.from(
+      doc.querySelectorAll("#browserItemList li.item"),
+    );
+    if (entries.some((li) => !li.querySelector("h3 a[href*='/subject/']")))
+      throw new Error("收藏条目结构无效");
+    return entries
       .map((li) => {
         const linkElement = li.querySelector("h3 a");
         if (!linkElement) return null;
@@ -445,7 +472,7 @@
     };
   }
 
-  const SCORE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+  const SCORE_TTL_MS = 72 * 60 * 60 * 1000;
   const SUBJECT_CACHE_VERSION = 3;
   class DrawEngine {
     constructor({
@@ -462,10 +489,12 @@
       if (
         !cached ||
         cached.version !== SUBJECT_CACHE_VERSION ||
-        !cached.fetchedAt
+        !Number.isFinite(cached.fetchedAt) ||
+        cached.fetchedAt < 0
       )
         return null;
-      return this.now() - cached.fetchedAt <= SCORE_TTL_MS ? cached : null;
+      const age = this.now() - cached.fetchedAt;
+      return age >= 0 && age < SCORE_TTL_MS ? cached : null;
     }
 
     async getSubjectInfo(subjectId, signal) {
@@ -480,7 +509,7 @@
           fetchedAt: this.now(),
           ...subjectResult,
         };
-        this.storage.saveSubjectMeta(subjectId, stored);
+        if (stored.resolved) this.storage.saveSubjectMeta(subjectId, stored);
         return stored;
       } catch (error) {
         if (error.name === "AbortError") throw error;
@@ -816,11 +845,10 @@
                         <div class="ark-gacha-info-area">
                             <div class="ark-gacha-pool-box">
                                 <span class="ark-gacha-pool-info" id="ark-gacha-info">POOL: 0</span>
-                                <button type="button" class="ark-gacha-refresh-btn" id="ark-gacha-refresh" title="清空当前类型/标签缓存并全量刷新">🔄</button>
+                                <button type="button" class="ark-gacha-refresh-btn" id="ark-gacha-refresh" title="全量更新当前收藏范围">🔄</button>
                             </div>
                             <div class="ark-gacha-progress-wrap" id="ark-gacha-progress-wrap" hidden>
                                 <span class="ark-gacha-progress" id="ark-gacha-progress">准备同步...</span>
-                                <button type="button" class="ark-gacha-mini-btn" id="ark-gacha-stop">停止</button>
                             </div>
                             <div class="ark-gacha-logs" id="ark-gacha-logs"></div>
                         </div>
@@ -840,7 +868,6 @@
         refresh: mask.querySelector("#ark-gacha-refresh"),
         progressWrap: mask.querySelector("#ark-gacha-progress-wrap"),
         progress: mask.querySelector("#ark-gacha-progress"),
-        stop: mask.querySelector("#ark-gacha-stop"),
         logs: mask.querySelector("#ark-gacha-logs"),
         confirm: mask.querySelector("#ark-gacha-confirm"),
         run3: mask.querySelector("#ark-gacha-run-3"),
@@ -857,9 +884,6 @@
       });
       this.ui.refresh.addEventListener("click", () =>
         this.session.forceRefresh(),
-      );
-      this.ui.stop.addEventListener("click", () =>
-        this.session.stopOperations(),
       );
       this.ui.run3.addEventListener("click", () => this.session.draw(3));
       this.ui.run10.addEventListener("click", () => this.session.draw(10));
@@ -891,6 +915,13 @@
     clearLogs() {
       this.logs = [];
       this.ui.logs.replaceChildren();
+    }
+
+    hasResultMessage() {
+      return (
+        Boolean(this.ui.result.querySelector(".ark-gacha-message")) &&
+        !this.session.busy
+      );
     }
 
     setResultMessage(message) {
@@ -929,10 +960,10 @@
     }
 
     updateButtons() {
-      const disabled = this.session.busy || this.session.pool.length === 0;
+      const disabled = this.session.busy || !this.session.complete;
       this.ui.run3.disabled = disabled || this.session.pool.length < 3;
       this.ui.run10.disabled = disabled || this.session.pool.length < 10;
-      this.ui.refresh.disabled = this.session.busy;
+      this.ui.refresh.disabled = false;
     }
 
     setProgressVisible(visible) {
@@ -975,24 +1006,24 @@
       this.ui.confirm.replaceChildren();
     }
 
-    showConfirm(changes) {
-      const names = changes
-        .map((change) => this.session.statusLabels[change.status])
-        .join("、");
+    showFailure(canUseCache) {
       this.ui.confirm.hidden = false;
       this.ui.confirm.innerHTML = `
-                <span>检测到 ${escapeHtml(names)} 的第一页发生变化，是否全量更新？</span>
+                <span>当前范围获取失败，请选择后续操作</span>
                 <span class="ark-gacha-confirm-actions">
-                    <button type="button" data-action="keep">继续使用缓存</button>
+                    ${canUseCache ? '<button type="button" data-action="keep">继续使用缓存</button>' : ""}
                     <button type="button" class="primary" data-action="refresh">全量更新</button>
                 </span>
             `;
       this.ui.confirm
         .querySelector('[data-action="keep"]')
-        .addEventListener("click", () => this.session.keepCachedChanges());
+        ?.addEventListener("click", () => this.hideConfirm());
       this.ui.confirm
         .querySelector('[data-action="refresh"]')
-        .addEventListener("click", () => this.session.refreshDetectedChanges());
+        .addEventListener("click", () => {
+          this.hideConfirm();
+          this.session.forceRefresh();
+        });
     }
 
     createCard(data) {
@@ -1052,31 +1083,9 @@
     }
   }
 
-  const FETCH_INTERVAL_MS = 350;
   const MAX_FALLBACK_PAGES = 10000;
-  function abortError() {
-    const error = new Error("Aborted");
-    error.name = "AbortError";
-    return error;
-  }
-  function sleep(ms, signal, browser) {
-    return new Promise((resolve, reject) => {
-      let timer;
-      const onAbort = () => {
-        browser.clearTimeout(timer);
-        if (signal) signal.removeEventListener("abort", onAbort);
-        reject(abortError());
-      };
-      const done = () => {
-        if (signal) signal.removeEventListener("abort", onAbort);
-        resolve();
-      };
-      timer = browser.setTimeout(done, ms);
-      if (signal) {
-        if (signal.aborted) onAbort();
-        else signal.addEventListener("abort", onAbort, { once: true });
-      }
-    });
+  function sleep(ms, browser) {
+    return new Promise((resolve) => browser.setTimeout(resolve, ms));
   }
 
   class GachaSession {
@@ -1112,19 +1121,14 @@
         random,
       });
       this.pool = [];
-      this.logs = [];
-      this.flowId = 0;
-      this.abortController = null;
-      this.drawAbortController = null;
-      this.titleHeightFrame = null;
-      this.busy = false;
+      this.complete = false;
       this.loaded = false;
-      this.pendingChanges = [];
+      this.busy = false; // drawing only
+      this.selectionId = 0;
+      this.tasks = new Map();
+      this.checking = new Set();
+      this.checkGeneration = new Map();
       this.view = createView(this);
-    }
-
-    open() {
-      if (!this.loaded && !this.busy) this.loadView();
     }
 
     targetStatuses() {
@@ -1132,407 +1136,223 @@
         ? [...STATUS_IDS]
         : [this.currentStatus];
     }
-
-    selectStatus(status) {
-      if (!STATUS_IDS.includes(status) && status !== "all") return;
-      this.stopOperations(false);
-      this.currentStatus = status;
-      this.view.selectStatus(status);
-      this.loaded = false;
-      this.loadView();
-    }
-
-    isActive(flowId) {
-      return flowId === this.flowId;
-    }
-
-    stopOperations(showMessage = true) {
-      ++this.flowId;
-      if (this.abortController) this.abortController.abort();
-      if (this.drawAbortController) this.drawAbortController.abort();
-      this.abortController = null;
-      this.drawAbortController = null;
-      this.busy = false;
-      this.view.setProgressVisible(false);
-      this.view.updateButtons();
-      if (showMessage) this.view.setStatus("已停止当前操作", true);
-    }
-
-    async loadPool(statuses) {
-      const pools = [];
-      for (const status of statuses)
-        pools.push(...this.storage.getItems(status));
-      this.pool = uniqueItems(pools);
+    refreshPool() {
+      const statuses = this.targetStatuses();
+      this.complete = statuses.every(
+        (status) => this.storage.getStatus(status) !== null,
+      );
+      this.pool = this.complete
+        ? uniqueItems(
+            statuses.flatMap((status) => this.storage.getItems(status)),
+          )
+        : [];
       this.view.updateInfo();
       this.view.updateButtons();
     }
-
-    createController() {
-      if (this.abortController) this.abortController.abort();
-      this.abortController = new AbortController();
-      return this.abortController;
+    open() {
+      if (!this.loaded) this.loadView();
     }
-
-    async loadView() {
-      this.stopOperations(false);
-      const flowId = this.flowId;
-      this.pendingChanges = [];
+    selectStatus(status) {
+      if (
+        (!STATUS_IDS.includes(status) && status !== "all") ||
+        status === this.currentStatus
+      )
+        return;
+      ++this.selectionId;
+      this.busy = false;
+      this.currentStatus = status;
+      this.view.selectStatus(status);
       this.view.hideConfirm();
-      this.view.clearLogs();
       this.view.setResultMessage("读取本地缓存中...");
-      this.view.setStatus("读取本地缓存中...");
-      this.view.setProgressVisible(true);
-      this.busy = true;
-      this.view.updateButtons();
-
-      const statuses = this.targetStatuses();
-      await this.loadPool(statuses);
-      if (!this.isActive(flowId)) return;
-
-      const missing = statuses.filter((status) => {
-        return !this.storage.getMeta(status);
-      });
-
-      if (this.pool.length > 0)
-        this.view.setResultMessage("缓存已载入，正在后台核验最新第一页...");
-
-      let controller = null;
-      try {
-        if (missing.length) {
-          this.view.setStatus("首次使用，开始全量同步...");
-          controller = this.createController();
-          await this.syncStatuses(missing, {
-            signal: controller.signal,
-            manual: false,
-            flowId,
-          });
-          if (!this.isActive(flowId)) return;
-          await this.loadPool(statuses);
-        }
-
-        this.busy = false;
-        this.view.setProgressVisible(false);
-        this.loaded = true;
-        this.view.updateButtons();
-        if (this.pool.length)
-          this.view.setResultMessage("数据已就绪，选择三连或十连开始抽卡");
-        else this.view.setResultMessage("该收藏状态暂无条目");
-        this.view.setStatus(
-          missing.length ? "✅ 全量同步完成" : "缓存可用，后台核验中",
-        );
-
-        if (this.isActive(flowId)) this.startValidation(statuses, flowId);
-      } catch (error) {
-        if (!this.isActive(flowId)) return;
-        if (error.name === "AbortError") {
-          this.view.setStatus("已停止同步", true);
-        } else {
-          this.view.addLog(`同步失败：${error.message}`, true);
-          this.view.setStatus("同步失败，仍保留可用缓存", true);
-          if (this.pool.length)
-            this.view.setResultMessage("同步失败，当前仍可使用本地缓存");
-          else this.view.setResultMessage("暂无可用缓存，请检查网络后刷新");
-        }
-        this.busy = false;
-        this.view.setProgressVisible(false);
-        this.view.updateButtons();
-      } finally {
-        if (this.abortController === controller) this.abortController = null;
+      this.loaded = false;
+      this.loadView();
+    }
+    loadView() {
+      this.loaded = true;
+      this.refreshPool();
+      this.view.setResultMessage(
+        this.complete
+          ? this.pool.length
+            ? "数据已就绪，选择三连或十连开始抽卡"
+            : "该收藏状态暂无条目"
+          : "正在获取收藏数据...",
+      );
+      const selection = this.selectionId;
+      for (const status of this.targetStatuses()) {
+        if (!this.storage.getStatus(status)) this.startTask(status, selection);
+        else this.checkStatus(status, selection);
       }
     }
-
+    async checkStatus(status, selection) {
+      if (this.checking.has(status) || this.tasks.has(status)) return;
+      this.checking.add(status);
+      const generation = this.checkGeneration.get(status) || 0;
+      const controller = new AbortController();
+      try {
+        this.view.setProgressVisible(true);
+        this.view.setStatus(
+          `核验 [${this.statusLabels[status]}] 最新第一页...`,
+        );
+        const remote = await this.client.fetchListPage(
+          status,
+          1,
+          controller.signal,
+          true,
+        );
+        const meta = this.storage.getMeta(status);
+        if (generation !== (this.checkGeneration.get(status) || 0)) return;
+        if (meta && firstPageFingerprint(remote.items) !== meta.fingerprint)
+          this.startTask(status, selection);
+        else if (selection === this.selectionId)
+          this.view.setStatus("✅ 最新第一页核验完成");
+      } catch (error) {
+        if (generation === (this.checkGeneration.get(status) || 0))
+          this.reportFailure(status, selection, error);
+      } finally {
+        this.checking.delete(status);
+        if (!this.tasks.size && !this.checking.size)
+          this.view.setProgressVisible(false);
+      }
+    }
+    startTask(status, selection = this.selectionId) {
+      if (this.tasks.has(status)) return this.tasks.get(status).promise;
+      this.checkGeneration.set(
+        status,
+        (this.checkGeneration.get(status) || 0) + 1,
+      );
+      const controller = new AbortController();
+      const task = { controller, selection, promise: null };
+      this.tasks.set(status, task);
+      this.view.setProgressVisible(true);
+      task.promise = (async () => {
+        try {
+          const result = await this.fetchAllStatus(status, controller.signal);
+          if (controller.signal.aborted) return;
+          this.storage.commitStatus(status, result.items, {
+            version: 2,
+            totalPages: result.totalPages,
+            fingerprint: result.snapshot.fingerprint,
+            firstPage: result.snapshot.items,
+            checkedAt: this.now(),
+            updatedAt: this.now(),
+          });
+          this.refreshPool();
+          if (this.targetStatuses().includes(status)) {
+            this.view.setStatus(
+              `✅ [${this.statusLabels[status]}] 全量更新完成`,
+            );
+            if (this.view.hasResultMessage())
+              this.view.setResultMessage(
+                this.complete
+                  ? this.pool.length
+                    ? "数据已就绪，选择三连或十连开始抽卡"
+                    : "该收藏状态暂无条目"
+                  : "正在获取收藏数据...",
+              );
+          }
+        } catch (error) {
+          if (error.name !== "AbortError")
+            this.reportFailure(status, task.selection, error);
+        } finally {
+          if (this.tasks.get(status) === task) this.tasks.delete(status);
+          if (!this.tasks.size && !this.checking.size)
+            this.view.setProgressVisible(false);
+        }
+      })();
+      return task.promise;
+    }
+    reportFailure(status, selection, error) {
+      this.view.addLog(
+        `[${this.statusLabels[status]}] 获取失败：${error.message}`,
+        true,
+      );
+      if (
+        selection !== this.selectionId ||
+        !this.targetStatuses().includes(status)
+      )
+        return;
+      this.refreshPool();
+      this.loaded = false;
+      this.view.setStatus("获取失败，已保留旧缓存", true);
+      this.view.showFailure(this.complete);
+    }
     async fetchAllStatus(status, signal) {
-      const statusName = this.statusLabels[status] || status;
-      this.view.setStatus(`同步 [${statusName}] 第 1 页...`);
+      const name = this.statusLabels[status];
+      this.view.setStatus(`同步 [${name}] 第 1 页...`);
       const first = await this.client.fetchListPage(status, 1, signal, true);
       const allItems = [...first.items];
-      const seenPageSignatures = new Set([firstPageFingerprint(first.items)]);
+      const signatures = new Set([firstPageFingerprint(first.items)]);
       const { totalPages, reliable } = first.pageInfo;
-      const upperBound = reliable ? totalPages : MAX_FALLBACK_PAGES;
-
-      if (reliable) {
-        for (let page = 2; page <= totalPages; page += 1) {
-          if (signal.aborted) throw abortError();
-          await sleep(FETCH_INTERVAL_MS, signal, this.browser);
-          this.view.setStatus(
-            `同步 [${statusName}] 第 ${page}/${totalPages} 页...`,
-          );
-          const result = await this.client.fetchListPage(
-            status,
-            page,
-            signal,
-            true,
-          );
-          if (!result.items.length) {
-            if (page < totalPages)
-              throw new Error(`第 ${page} 页为空，分页数据可能不完整`);
-            break;
-          }
-          const signature = firstPageFingerprint(result.items);
-          if (seenPageSignatures.has(signature))
-            throw new Error(`第 ${page} 页重复，已停止以保护旧缓存`);
-          seenPageSignatures.add(signature);
-          allItems.push(...result.items);
+      if (!Number.isInteger(totalPages) || totalPages < 1)
+        throw new Error("分页数据无效");
+      let page = 2;
+      const bound = reliable ? totalPages : MAX_FALLBACK_PAGES;
+      while (page <= bound && (reliable || first.items.length)) {
+        if (signal.aborted) return;
+        await sleep(350, this.browser);
+        if (signal.aborted) return;
+        this.view.setStatus(
+          `同步 [${name}] 第 ${page}${reliable ? `/${totalPages}` : ""} 页...`,
+        );
+        const result = await this.client.fetchListPage(
+          status,
+          page,
+          signal,
+          true,
+        );
+        if (!result.items.length) {
+          if (reliable && page < totalPages)
+            throw new Error(`第 ${page} 页为空，分页数据可能不完整`);
+          break;
         }
-      } else {
-        let page = 2;
-        while (page <= upperBound) {
-          if (signal.aborted) throw abortError();
-          await sleep(FETCH_INTERVAL_MS, signal, this.browser);
-          this.view.setStatus(
-            `同步 [${statusName}] 第 ${page} 页（未发现可靠末页）...`,
-          );
-          const result = await this.client.fetchListPage(
-            status,
-            page,
-            signal,
-            true,
-          );
-          if (!result.items.length) break;
-          const signature = firstPageFingerprint(result.items);
-          if (seenPageSignatures.has(signature)) {
-            throw new Error(`第 ${page} 页重复，无法确认分页末页`);
-          }
-          seenPageSignatures.add(signature);
-          allItems.push(...result.items);
-          page += 1;
-        }
-        if (page > MAX_FALLBACK_PAGES)
-          throw new Error("分页超过安全上限，已停止同步");
+        const signature = firstPageFingerprint(result.items);
+        if (signatures.has(signature))
+          throw new Error(`第 ${page} 页重复，无法确认分页末页`);
+        signatures.add(signature);
+        allItems.push(...result.items);
+        page += 1;
       }
-
-      const items = uniqueItems(allItems);
+      if (!reliable && page > MAX_FALLBACK_PAGES)
+        throw new Error("分页超过安全上限");
       return {
-        items,
-        totalPages: reliable
-          ? totalPages
-          : Math.max(1, seenPageSignatures.size),
+        items: uniqueItems(allItems),
+        totalPages: reliable ? totalPages : Math.max(1, signatures.size),
         snapshot: firstPageSnapshot(first.items, this.now),
       };
     }
-
-    async syncStatuses(statuses, options) {
-      const { signal, manual = false, flowId = this.flowId } = options;
-      this.busy = true;
-      this.view.setProgressVisible(true);
-      this.view.updateButtons();
-
-      for (const status of statuses) {
-        if (signal.aborted) throw abortError();
-        if (!this.isActive(flowId)) throw abortError();
-
-        const oldItems = this.storage.getItems(status);
-        const result = await this.fetchAllStatus(status, signal);
-        if (signal.aborted || !this.isActive(flowId)) throw abortError();
-        const meta = {
-          version: 2,
-          totalPages: result.totalPages,
-          fingerprint: result.snapshot.fingerprint,
-          firstPage: result.snapshot.items,
-          checkedAt: this.now(),
-          updatedAt: this.now(),
-        };
-
-        this.storage.commitStatus(status, result.items, meta);
-        if (manual) {
-          const ids = [...oldItems, ...result.items].map((item) => item.id);
-          this.storage.clearSubjectMeta(ids);
-        }
-        await this.loadPool(this.targetStatuses());
-      }
-    }
-
-    async startValidation(statuses, flowId) {
-      if (!this.isActive(flowId) || this.busy) return;
-      const controller = this.createController();
-      this.view.setProgressVisible(true);
-      const changes = [];
-
-      try {
-        for (const status of statuses) {
-          if (controller.signal.aborted) throw abortError();
-          const meta = this.storage.getMeta(status);
-          if (!meta) continue;
-
-          const statusName = this.statusLabels[status] || status;
-          this.view.setStatus(`核验 [${statusName}] 最新第一页...`);
-          const remote = await this.client.fetchListPage(
-            status,
-            1,
-            controller.signal,
-            true,
-          );
-          if (controller.signal.aborted || !this.isActive(flowId)) return;
-          const snapshot = firstPageSnapshot(remote.items, this.now);
-          const sameAsAccepted = snapshot.fingerprint === meta.fingerprint;
-
-          if (sameAsAccepted) {
-            meta.checkedAt = this.now();
-            this.storage.writeJson(this.storage.metaKey(status), meta);
-          } else {
-            changes.push({
-              status,
-              snapshot,
-              totalPages: remote.pageInfo.totalPages,
-            });
-          }
-        }
-
-        if (changes.length && this.isActive(flowId)) {
-          this.pendingChanges = changes;
-          this.view.showConfirm(changes);
-          this.view.setStatus(
-            `发现 ${changes.length} 个状态有变化，请选择同步方式`,
-          );
-        } else if (this.isActive(flowId)) {
-          this.view.setStatus("✅ 最新第一页核验完成");
-        }
-      } catch (error) {
-        if (this.isActive(flowId) && error.name !== "AbortError") {
-          this.view.addLog(`后台核验失败：${error.message}`, true);
-          this.view.setStatus("后台核验失败，继续使用本地缓存", true);
-        }
-      } finally {
-        if (this.isActive(flowId)) {
-          if (this.abortController === controller) this.abortController = null;
-          this.view.setProgressVisible(false);
-          this.view.updateButtons();
-        }
-      }
-    }
-
-    keepCachedChanges() {
-      this.pendingChanges = [];
-      this.view.hideConfirm();
-      this.view.setStatus("已保留本地缓存，下次核验时会再次提示");
-    }
-
-    async refreshDetectedChanges() {
-      const changes = this.pendingChanges.splice(0);
-      this.view.hideConfirm();
-      if (!changes.length) return;
-      const flowId = ++this.flowId;
-      const controller = this.createController();
-      this.view.setResultMessage("变化状态全量更新中...");
-      try {
-        await this.syncStatuses(
-          changes.map((change) => change.status),
-          {
-            signal: controller.signal,
-            manual: false,
-            flowId,
-          },
-        );
-        if (!this.isActive(flowId)) return;
-        this.loaded = true;
-        this.view.setProgressVisible(false);
-        this.view.setResultMessage("✅ 变化状态已更新，可以继续抽卡");
-        this.view.setStatus("✅ 变化状态全量更新完成");
-      } catch (error) {
-        if (!this.isActive(flowId)) return;
-        if (error.name === "AbortError")
-          this.view.setStatus("已停止全量更新", true);
-        else {
-          this.view.addLog(`全量更新失败：${error.message}`, true);
-          this.view.setStatus("更新失败，继续使用旧缓存", true);
-          this.view.setResultMessage("更新失败，当前仍可使用旧缓存");
-        }
-      } finally {
-        if (!this.isActive(flowId)) return;
-        if (this.abortController === controller) this.abortController = null;
-        this.busy = false;
-        this.view.setProgressVisible(false);
-        this.view.updateButtons();
-      }
-    }
-
     async forceRefresh() {
-      if (this.busy) this.stopOperations(false);
-      this.pendingChanges = [];
       this.view.hideConfirm();
-      const statuses = this.targetStatuses();
-      const flowId = ++this.flowId;
-      const controller = this.createController();
-      this.view.clearLogs();
-      this.view.setResultMessage("准备清理当前作用域并全量刷新...");
-      this.view.setStatus("全量刷新中...");
-      try {
-        await this.syncStatuses(statuses, {
-          signal: controller.signal,
-          manual: true,
-          flowId,
-        });
-        await this.loadPool(statuses);
-        if (!this.isActive(flowId)) return;
-        this.loaded = true;
-        this.view.setResultMessage(
-          this.pool.length ? "✅ 全量刷新完成，可以抽卡" : "该收藏状态暂无条目",
-        );
-        this.view.setStatus("✅ 全量刷新完成");
-      } catch (error) {
-        if (!this.isActive(flowId)) return;
-        if (error.name === "AbortError")
-          this.view.setStatus("已停止全量刷新", true);
-        else {
-          this.view.addLog(`全量刷新失败：${error.message}`, true);
-          this.view.setStatus("刷新失败，已保留旧缓存", true);
-          this.view.setResultMessage(
-            this.pool.length
-              ? "刷新失败，当前仍可使用旧缓存"
-              : "刷新失败，请稍后重试",
-          );
-        }
-      } finally {
-        if (!this.isActive(flowId)) return;
-        if (this.abortController === controller) this.abortController = null;
-        this.busy = false;
-        this.view.setProgressVisible(false);
-        this.view.updateButtons();
-      }
+      return Promise.all(
+        this.targetStatuses().map((status) => this.startTask(status)),
+      );
     }
-
     async draw(count) {
-      if (this.busy || this.pool.length < count) return;
+      if (this.busy || !this.complete || this.pool.length < count) return;
       this.busy = true;
-      const controller = new AbortController();
-      this.drawAbortController = controller;
+      const selection = this.selectionId;
+      const snapshot = [...this.pool];
       this.view.updateButtons();
       this.view.clearLogs();
-      this.view.setStatus(`正在准备 ${count === 10 ? "十连" : "三连"}...`);
       try {
         this.view.setShuffling(true);
-        await sleep(600, controller.signal, this.browser);
+        await sleep(600, this.browser);
+        if (selection !== this.selectionId) return;
         this.view.setShuffling(false);
-
         this.view.showPreparingCards(count);
-        const cardData = await this.engine.cards(
-          this.pool,
-          count,
-          controller.signal,
-        );
-        const failed = cardData.filter(
-          ({ info }) =>
-            info.source === "error" || !info.resolved || !info.hasScore,
+        // Don't abort score requests on selection change: successful late scores remain cacheable.
+        const cards = await this.engine.cards(snapshot, count);
+        if (selection !== this.selectionId) return;
+        this.view.showCards(cards, count);
+        const failed = cards.filter(
+          ({ info }) => !info.resolved || !info.hasScore,
         ).length;
-        this.view.showCards(cardData, count);
-        if (failed) {
+        if (failed)
           this.view.addLog(`${failed} 个条目评分获取失败，已按黑卡显示`, true);
-          this.view.setStatus(`抽卡完成，${failed} 个评分请求失败`, true);
-        } else {
-          this.view.setStatus("✅ 抽卡完成");
-        }
       } catch (error) {
-        if (this.drawAbortController !== controller) return;
-        if (error.name === "AbortError") {
-          this.view.setStatus("抽卡已停止", true);
-          this.view.setResultMessage("抽卡已停止");
-        } else {
+        if (selection === this.selectionId)
           this.view.addLog(`抽卡失败：${error.message}`, true);
-          this.view.setStatus("抽卡失败，请重试", true);
-        }
       } finally {
-        if (this.drawAbortController === controller) {
-          this.drawAbortController = null;
+        if (selection === this.selectionId) {
           this.busy = false;
           this.view.updateButtons();
         }

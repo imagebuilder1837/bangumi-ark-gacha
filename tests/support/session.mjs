@@ -46,7 +46,16 @@ export function setup({ ignoreAbort = false, browser } = {}) {
   };
   const session = new GachaSession(
     { userId: "test", subjectType: "anime", status: "wish" },
-    { client, browser },
+    {
+      client,
+      browser: browser || {
+        setTimeout: (fn) => {
+          queueMicrotask(fn);
+          return 1;
+        },
+        clearTimeout() {},
+      },
+    },
   );
   const click = (selector) => document.querySelector(selector).click();
   return { dom, session, requests, click };
