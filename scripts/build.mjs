@@ -11,7 +11,7 @@ if (Object.keys(pkg.dependencies || {}).length)
   throw new Error("Userscript cannot have runtime package dependencies");
 if ((metadata.match(/\{\{version\}\}/g) || []).length !== 1)
   throw new Error("Metadata must contain exactly one version placeholder");
-const header = metadata.replace("{{version}}", pkg.version);
+const header = metadata.replace("{{version}}", pkg.version).trimEnd();
 const bundle = await rollup({ input: "src/main.mjs" });
 const { output } = await bundle.generate({
   format: "iife",
@@ -26,7 +26,7 @@ if (
   throw new Error("Expected a self-contained single script");
 const result =
   header +
-  "\n// Generated from src/main.mjs and its module imports. Do not edit; run npm run build.\n" +
+  "\n\n// Generated from src/main.mjs and its module imports. Do not edit; run npm run build.\n" +
   (await prettier.format(output[0].code, { parser: "babel" }));
 const path = "src/index.user.js";
 if (process.argv.includes("--check")) {
