@@ -55,6 +55,7 @@ export class GachaSession {
     this.busy = false;
     this.selectionId = 0;
     this.tasks = new Map();
+    this.progressVersion = 0;
     this.view = createView(this);
   }
 
@@ -117,7 +118,9 @@ export class GachaSession {
       foreground
         .map((status) => this.tasks.get(status))
         .find((task) => task.progress) ||
-      [...this.tasks.values()].reverse().find((task) => task.progress);
+      [...this.tasks.values()]
+        .filter((task) => task.progress)
+        .sort((a, b) => b.progressUpdated - a.progressUpdated)[0];
     this.view.setProgressVisible(this.tasks.size > 0);
     if (visible) this.view.setStatus(visible.progress);
   }
@@ -161,6 +164,7 @@ export class GachaSession {
   }
   progress(task, done, total, checking = false) {
     task.progress = `${checking ? "核验" : "同步"} [${this.statusLabels[task.status]}] ${done}/${total} 页`;
+    task.progressUpdated = ++this.progressVersion;
     this.focus();
   }
   async runTask(task) {
@@ -297,7 +301,7 @@ export class GachaSession {
           break;
         }
         if (page === MAX_FALLBACK_PAGES) throw new Error("分页超过安全上限");
-        this.progress(task, page, page + 1);
+        if (page === 1) this.progress(task, page, page + 1);
         ++page;
         const result = await this.scheduler.request(status, page, signal);
         if (signal.aborted) return;
@@ -314,9 +318,15 @@ export class GachaSession {
           throw new Error(`第 ${page} 页重复，无法确认分页末页`);
         signatures.add(signature);
         pages.set(page, result.items);
-        this.progress(task, page, page);
-        if (result.pageInfo.reliable && result.pageInfo.totalPages === page)
+        if (
+          !result.items.length ||
+          (result.pageInfo.reliable && result.pageInfo.totalPages === page)
+        ) {
+          this.progress(task, page, page);
           break;
+        }
+        if (page === MAX_FALLBACK_PAGES) throw new Error("分页超过安全上限");
+        this.progress(task, page, page + 1);
       }
     }
     return {

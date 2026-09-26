@@ -38,6 +38,25 @@ test("four slots are shared; foreground in flight reserves idle slots and backgr
   assert.equal(requests.length, 5, "cancelled queued requests never dispatch");
 });
 
+test("an uncooperative transport keeps its slot until the aborted request settles", async () => {
+  const { scheduler, requests } = fixture();
+  const controls = Array.from({ length: 5 }, () => new AbortController());
+  const pending = controls.map((control, page) =>
+    scheduler.request("wish", page + 1, control.signal),
+  );
+  await flush();
+  assert.equal(requests.length, 4);
+  controls[0].abort();
+  await assert.rejects(pending[0], /Abort/);
+  await flush();
+  assert.equal(requests.length, 4);
+  requests[0].resolve("late");
+  await flush();
+  assert.equal(requests.length, 5);
+  requests.slice(1).forEach((request) => request.resolve("done"));
+  await Promise.all(pending.slice(1));
+});
+
 test("switching priority does not cancel old in-flight work and lifts queued work", async () => {
   const { scheduler, requests } = fixture();
   const controller = new AbortController();

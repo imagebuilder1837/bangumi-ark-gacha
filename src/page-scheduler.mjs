@@ -31,7 +31,6 @@ export class PageScheduler {
       job.abort = () => {
         this.queue = this.queue.filter((entry) => entry !== job);
         job.controller.abort();
-        this.running.delete(job);
         reject(new DOMException("Aborted", "AbortError"));
         this.drain();
       };

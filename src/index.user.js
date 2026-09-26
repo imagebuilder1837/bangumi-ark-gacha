@@ -519,7 +519,6 @@
         job.abort = () => {
           this.queue = this.queue.filter((entry) => entry !== job);
           job.controller.abort();
-          this.running.delete(job);
           reject(new DOMException("Aborted", "AbortError"));
           this.drain();
         };
@@ -890,6 +889,7 @@
       this.logs = [];
       this.notifications = [];
       this.progressMessage = "";
+      this.progressVisible = false;
       this.titleHeightFrame = null;
       this.renderStyles();
       this.renderLauncher();
@@ -1002,8 +1002,8 @@
     }
 
     showNextNotification() {
-      this.setProgressVisible(this.session.tasks.size > 0);
       this.renderStatus();
+      this.renderStatusVisibility();
       if (!this.notifications.length) return;
       this.session.browser.setTimeout(() => {
         this.notifications.shift();
@@ -1019,6 +1019,7 @@
     setLoginNotice(message) {
       this.loginMessage = message;
       this.renderStatus();
+      this.renderStatusVisibility();
     }
 
     addLog(message, error = false) {
@@ -1089,8 +1090,15 @@
     }
 
     setProgressVisible(visible) {
+      this.progressVisible = visible;
+      this.renderStatusVisibility();
+    }
+
+    renderStatusVisibility() {
       this.ui.progressWrap.hidden =
-        !visible && !this.notifications.length && !this.loginMessage;
+        !this.progressVisible &&
+        !this.notifications.length &&
+        !this.loginMessage;
     }
 
     selectStatus(status) {
@@ -1250,6 +1258,7 @@
       this.busy = false;
       this.selectionId = 0;
       this.tasks = new Map();
+      this.progressVersion = 0;
       this.view = createView(this);
     }
 
@@ -1314,7 +1323,9 @@
         foreground
           .map((status) => this.tasks.get(status))
           .find((task) => task.progress) ||
-        [...this.tasks.values()].reverse().find((task) => task.progress);
+        [...this.tasks.values()]
+          .filter((task) => task.progress)
+          .sort((a, b) => b.progressUpdated - a.progressUpdated)[0];
       this.view.setProgressVisible(this.tasks.size > 0);
       if (visible) this.view.setStatus(visible.progress);
     }
@@ -1358,6 +1369,7 @@
     }
     progress(task, done, total, checking = false) {
       task.progress = `${checking ? "核验" : "同步"} [${this.statusLabels[task.status]}] ${done}/${total} 页`;
+      task.progressUpdated = ++this.progressVersion;
       this.focus();
     }
     async runTask(task) {
@@ -1498,7 +1510,7 @@
             break;
           }
           if (page === MAX_FALLBACK_PAGES) throw new Error("分页超过安全上限");
-          this.progress(task, page, page + 1);
+          if (page === 1) this.progress(task, page, page + 1);
           ++page;
           const result = await this.scheduler.request(status, page, signal);
           if (signal.aborted) return;
@@ -1515,9 +1527,15 @@
             throw new Error(`第 ${page} 页重复，无法确认分页末页`);
           signatures.add(signature);
           pages.set(page, result.items);
-          this.progress(task, page, page);
-          if (result.pageInfo.reliable && result.pageInfo.totalPages === page)
+          if (
+            !result.items.length ||
+            (result.pageInfo.reliable && result.pageInfo.totalPages === page)
+          ) {
+            this.progress(task, page, page);
             break;
+          }
+          if (page === MAX_FALLBACK_PAGES) throw new Error("分页超过安全上限");
+          this.progress(task, page, page + 1);
         }
       }
       return {

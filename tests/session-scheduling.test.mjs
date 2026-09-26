@@ -56,6 +56,16 @@ test("unknown pagination discovers denominator atomically, counts terminal empty
     document.querySelector("#ark-gacha-progress").textContent,
     /0\/1/,
   );
+  const seen = [];
+  const progressNode = document.querySelector("#ark-gacha-progress");
+  const observer = new dom.window.MutationObserver(() =>
+    seen.push(progressNode.textContent),
+  );
+  observer.observe(progressNode, {
+    childList: true,
+    characterData: true,
+    subtree: true,
+  });
   await settle(requests, "wish", page([item(1)], 1, false));
   assert.match(
     document.querySelector("#ark-gacha-progress").textContent,
@@ -63,6 +73,10 @@ test("unknown pagination discovers denominator atomically, counts terminal empty
   );
   assert.equal(requests[1].page, 2);
   await settle(requests, "wish", page([item(2)], 1, false));
+  assert.ok(
+    !seen.some((message) => /2\/2 页/.test(message)),
+    "no transient completed denominator",
+  );
   assert.match(
     document.querySelector("#ark-gacha-progress").textContent,
     /2\/3/,
@@ -70,6 +84,30 @@ test("unknown pagination discovers denominator atomically, counts terminal empty
   await settle(requests, "wish", page([], 1, false));
   assert.deepEqual(ids(session, "wish"), ["1", "2"]);
   assert.equal(requests.length, 3);
+  observer.disconnect();
+  dom.window.close();
+});
+
+test("without foreground work progress follows the most recently updated background task", async () => {
+  const { dom, requests, click } = setup();
+  click(".ark-gacha-launcher");
+  await flush();
+  click('[data-status="do"]');
+  await flush();
+  click('[data-status="collect"]');
+  await flush();
+  await settle(requests, "collect");
+  await settle(requests, "do", page([item(2)], 1, false));
+  await settle(requests, "wish", page([item(1)], 1, false));
+  assert.match(
+    document.querySelector("#ark-gacha-progress").textContent,
+    /想看.*1\/2/,
+  );
+  await settle(requests, "do", page([item(3)], 1, false));
+  assert.match(
+    document.querySelector("#ark-gacha-progress").textContent,
+    /在看.*2\/3/,
+  );
   dom.window.close();
 });
 

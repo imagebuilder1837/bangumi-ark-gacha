@@ -199,6 +199,7 @@ export class GachaView {
     this.logs = [];
     this.notifications = [];
     this.progressMessage = "";
+    this.progressVisible = false;
     this.titleHeightFrame = null;
     this.renderStyles();
     this.renderLauncher();
@@ -311,8 +312,8 @@ export class GachaView {
   }
 
   showNextNotification() {
-    this.setProgressVisible(this.session.tasks.size > 0);
     this.renderStatus();
+    this.renderStatusVisibility();
     if (!this.notifications.length) return;
     this.session.browser.setTimeout(() => {
       this.notifications.shift();
@@ -328,6 +329,7 @@ export class GachaView {
   setLoginNotice(message) {
     this.loginMessage = message;
     this.renderStatus();
+    this.renderStatusVisibility();
   }
 
   addLog(message, error = false) {
@@ -398,8 +400,13 @@ export class GachaView {
   }
 
   setProgressVisible(visible) {
+    this.progressVisible = visible;
+    this.renderStatusVisibility();
+  }
+
+  renderStatusVisibility() {
     this.ui.progressWrap.hidden =
-      !visible && !this.notifications.length && !this.loginMessage;
+      !this.progressVisible && !this.notifications.length && !this.loginMessage;
   }
 
   selectStatus(status) {
