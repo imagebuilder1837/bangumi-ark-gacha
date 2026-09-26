@@ -9,9 +9,9 @@ if (pkg.version !== lock.version || pkg.version !== lock.packages[""].version)
   throw new Error("Package and lockfile versions differ");
 if (Object.keys(pkg.dependencies || {}).length)
   throw new Error("Userscript cannot have runtime package dependencies");
-if ((metadata.match(/\{\{version\}\}/g) || []).length !== 1)
+if ((metadata.match(/\{\{VERSION\}\}/g) || []).length !== 1)
   throw new Error("Metadata must contain exactly one version placeholder");
-const header = metadata.replace("{{version}}", pkg.version).trimEnd();
+const header = metadata.replace("{{VERSION}}", pkg.version).trimEnd();
 const bundle = await rollup({ input: "src/main.mjs" });
 const { output } = await bundle.generate({
   format: "iife",
