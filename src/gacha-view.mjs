@@ -197,6 +197,8 @@ export class GachaView {
   constructor(session) {
     this.session = session;
     this.logs = [];
+    this.notifications = [];
+    this.progressMessage = "";
     this.titleHeightFrame = null;
     this.renderStyles();
     this.renderLauncher();
@@ -298,9 +300,34 @@ export class GachaView {
     if (open) this.scheduleTitleHeightSync();
   }
 
-  setStatus(message, error = false) {
-    this.ui.progress.textContent = message;
-    this.ui.progress.classList.toggle("ark-gacha-log-error", Boolean(error));
+  setStatus(message) {
+    this.progressMessage = message;
+    this.renderStatus();
+  }
+
+  notify(message) {
+    this.notifications.push(message);
+    if (this.notifications.length === 1) this.showNextNotification();
+  }
+
+  showNextNotification() {
+    this.setProgressVisible(this.session.tasks.size > 0);
+    this.renderStatus();
+    if (!this.notifications.length) return;
+    this.session.browser.setTimeout(() => {
+      this.notifications.shift();
+      this.showNextNotification();
+    }, 5000);
+  }
+
+  renderStatus() {
+    this.ui.progress.textContent =
+      this.loginMessage || this.notifications[0] || this.progressMessage;
+  }
+
+  setLoginNotice(message) {
+    this.loginMessage = message;
+    this.renderStatus();
   }
 
   addLog(message, error = false) {
@@ -371,7 +398,8 @@ export class GachaView {
   }
 
   setProgressVisible(visible) {
-    this.ui.progressWrap.hidden = !visible;
+    this.ui.progressWrap.hidden =
+      !visible && !this.notifications.length && !this.loginMessage;
   }
 
   selectStatus(status) {

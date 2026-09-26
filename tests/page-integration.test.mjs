@@ -4,7 +4,40 @@ import { GachaSession } from "../src/gacha-session.mjs";
 import { GachaStorage } from "../src/collection-cache.mjs";
 import { createBangumiClient } from "../src/bangumi-client.mjs";
 import { DrawEngine } from "../src/draw-engine.mjs";
-import { environment } from "./support/session.mjs";
+import { environment, flush } from "./support/session.mjs";
+
+test("real request adapter, session and DOM publish a complete state despite another state failing", async () => {
+  const dom = environment();
+  const requests = [];
+  const client = createBangumiClient({
+    subjectType: "anime",
+    userId: "test",
+    transport: (url, { signal }) =>
+      new Promise((resolve) => {
+        requests.push({ url, signal, resolve });
+      }),
+  });
+  const session = new GachaSession(
+    { userId: "test", subjectType: "anime", status: "wish" },
+    { client },
+  );
+  document.querySelector('[data-status="all"]').click();
+  await flush();
+  const wish = requests.find(({ url }) => url.endsWith("/wish"));
+  wish.resolve({
+    ok: true,
+    text: async () =>
+      '<ul id="browserItemList"><li class="item"><h3><a href="/subject/42">新条目</a></h3></li></ul><div class="p_edge">1 / 1</div>',
+  });
+  await flush();
+  const doing = requests.find(({ url }) => url.endsWith("/do"));
+  doing.resolve({ ok: false, status: 500 });
+  await flush();
+  assert.equal(session.storage.getItems("wish")[0].id, "42");
+  assert.equal(session.storage.getStatus("do"), null);
+  assert.equal(document.querySelector("#ark-gacha-confirm").hidden, false);
+  dom.window.close();
+});
 
 test("real HTML list/score parsing and card interaction use actual selectors", async () => {
   const dom = environment();

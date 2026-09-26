@@ -67,19 +67,23 @@ test("all needs five complete statuses; empty counts as complete and publication
   click('[data-status="all"]');
   await flush();
   assert.equal(session.complete, false);
-  assert.equal(requests.length, 1, "list checks and updates stay serial");
-  while (requests.at(-1).status !== "wish") {
-    requests.at(-1).resolve(empty);
+  assert.equal(requests.length, 4, "list checks and updates share four slots");
+  while (requests.some((request) => !request.handled) || requests.length < 5) {
+    const next = requests.find((request) => !request.handled);
+    if (next) {
+      next.handled = true;
+      next.resolve(
+        next.status === "wish" ? page([item(1), item(2), item(3)]) : empty,
+      );
+    }
     await flush();
   }
-  requests.at(-1).resolve(page([item(1), item(2), item(3)]));
-  await flush();
   assert.equal(session.complete, true);
   assert.equal(session.pool.length, 3);
   dom.window.close();
 });
 
-test("late response from replaced update cannot publish over manual refresh", async () => {
+test("manual refresh reuses a covering update instead of replacing it", async () => {
   const { dom, session, requests, click } = setup({ ignoreAbort: true });
   session.storage.commitStatus("wish", [item(1), item(2), item(3)], meta);
   click(".ark-gacha-launcher");
@@ -88,18 +92,13 @@ test("late response from replaced update cannot publish over manual refresh", as
   await flush();
   const old = requests[1];
   click("#ark-gacha-refresh");
-  assert.equal(old.signal.aborted, true);
+  assert.equal(old.signal.aborted, false);
+  assert.equal(requests.length, 2);
   old.resolve(page([item(4), item(5), item(6)]));
   await flush();
   assert.deepEqual(
     session.storage.getItems("wish").map(({ id }) => id),
-    ["1", "2", "3"],
-  );
-  requests[2].resolve(page([item(7), item(8), item(9)]));
-  await flush();
-  assert.deepEqual(
-    session.storage.getItems("wish").map(({ id }) => id),
-    ["7", "8", "9"],
+    ["4", "5", "6"],
   );
   dom.window.close();
 });
@@ -165,7 +164,7 @@ test("a published update cannot change a pending draw; late successful scores ar
   dom.window.close();
 });
 
-test("status switch cancels old fetch and prevents late draw from replacing new view", async () => {
+test("status switch retains old fetch and prevents late draw from replacing new view", async () => {
   const { dom, session, requests, click } = setup();
   session.storage.commitStatus("wish", [item(1), item(2), item(3)], meta);
   click(".ark-gacha-launcher");
@@ -173,7 +172,7 @@ test("status switch cancels old fetch and prevents late draw from replacing new 
   click("#ark-gacha-run-3");
   click('[data-status="do"]');
   await flush();
-  assert.equal(requests[0].signal.aborted, true);
+  assert.equal(requests[0].signal.aborted, false);
   assert.equal(requests[1].status, "do");
   requests[1].resolve(empty);
   await flush();

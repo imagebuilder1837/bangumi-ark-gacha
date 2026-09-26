@@ -7,7 +7,7 @@
     "build": "node scripts/build.mjs",
     "format": "prettier --write src/*.mjs scripts/*.mjs tests/*.mjs tests/support/*.mjs",
     "format:check": "prettier --check src/*.mjs scripts/*.mjs tests/*.mjs tests/support/*.mjs",
-    "typecheck": "node --check src/main.mjs && node --check src/gacha-session.mjs && node --check src/gacha-view.mjs && node --check src/draw-engine.mjs && node --check src/bangumi-client.mjs && node --check src/collection-cache.mjs",
+    "typecheck": "node --check src/main.mjs && node --check src/gacha-session.mjs && node --check src/page-scheduler.mjs && node --check src/gacha-view.mjs && node --check src/draw-engine.mjs && node --check src/bangumi-client.mjs && node --check src/collection-cache.mjs",
     "test": "node --test tests/*.test.mjs",
     "check": "npm run format:check && npm run typecheck && npm test && node scripts/build.mjs --check"
   },

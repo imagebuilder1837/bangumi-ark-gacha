@@ -100,6 +100,23 @@ test("list timeout starts on dispatch and uses the injected clock", async () => 
   dom.window.close();
 });
 
+test("login and malformed list pages cannot be treated as empty collections", async () => {
+  const dom = browser();
+  for (const html of [
+    '<form action="/login"></form>',
+    '<div class="challenge">verify</div>',
+    '<ul id="browserItemList"><li class="item">broken</li></ul>',
+  ]) {
+    const client = createBangumiClient({
+      subjectType: "anime",
+      userId: "test",
+      transport: async () => ({ ok: true, text: async () => html }),
+    });
+    await assert.rejects(client.fetchListPage("wish", 1));
+  }
+  dom.window.close();
+});
+
 test("HTTP errors are rejected rather than reported as an empty page", async () => {
   const dom = browser();
   const client = createBangumiClient({

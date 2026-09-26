@@ -139,7 +139,11 @@ export function pageInfo(doc, origin) {
   const edgeText = edge ? edge.textContent || "" : "";
   const edgeMatch = edgeText.match(/(\d+)\s*\/\s*(\d+)/);
   if (edgeMatch) {
-    return { totalPages: Math.max(1, Number(edgeMatch[2])), reliable: true };
+    return {
+      currentPage: Number(edgeMatch[1]),
+      totalPages: Number(edgeMatch[2]),
+      reliable: true,
+    };
   }
 
   const pageNumbers = Array.from(
@@ -159,10 +163,20 @@ export function pageInfo(doc, origin) {
 }
 
 export function parseListPage(doc, origin) {
-  if (!doc.querySelector("#browserItemList"))
+  if (!doc.querySelector("#browserItemList")) {
+    if (doc.querySelector('form[action*="login"], a[href*="/login"]'))
+      throw new Error("请先登录 Bangumi");
     throw new Error("收藏列表结构无效");
+  }
   const entries = Array.from(doc.querySelectorAll("#browserItemList li.item"));
-  if (entries.some((li) => !li.querySelector("h3 a[href*='/subject/']")))
+  if (
+    entries.some((li) => {
+      const link = li.querySelector("h3 a[href*='/subject/']");
+      return (
+        !link || !subjectIdFromLink(link.href || link.getAttribute("href"))
+      );
+    })
+  )
     throw new Error("收藏条目结构无效");
   return entries
     .map((li) => {
