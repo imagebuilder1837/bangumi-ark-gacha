@@ -14,12 +14,10 @@
 // @updateURL    https://raw.githubusercontent.com/imagebuilder1837/bangumi-ark-gacha/refs/heads/main/src/index.user.js
 // ==/UserScript==
 
+// Generated from src/main.mjs and its module imports. Do not edit; run npm run build.
 (function () {
   "use strict";
 
-  const ROUTE_RE =
-    /\/(anime|book|game|real|music)\/list\/([^/]+)(?:\/([^/]+))?(?:\/|$)/;
-  const SUBJECT_TYPES = ["anime", "book", "game", "real", "music"];
   const STATUS_IDS = ["wish", "do", "on_hold", "collect", "dropped"];
   const SUBJECT_ACTIONS = {
     anime: "看",
@@ -27,23 +25,6 @@
     game: "玩",
     book: "读",
     music: "听",
-  };
-
-  const STORAGE_PREFIX = "bangumi-ark-gacha";
-  const SCORE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-  const SUBJECT_CACHE_VERSION = 3;
-  const FETCH_INTERVAL_MS = 350;
-  const PAGE_TIMEOUT_MS = 10000;
-  const SCORE_TIMEOUT_MS = 5000;
-  const MAX_FALLBACK_PAGES = 10000;
-
-  const routeMatch = window.location.pathname.match(ROUTE_RE);
-  if (!routeMatch || !SUBJECT_TYPES.includes(routeMatch[1])) return;
-
-  const route = {
-    subjectType: routeMatch[1],
-    userId: routeMatch[2],
-    status: STATUS_IDS.includes(routeMatch[3]) ? routeMatch[3] : "wish",
   };
 
   function statusLabelsFor(subjectType) {
@@ -56,52 +37,6 @@
       collect: `${action}过`,
       dropped: "抛弃",
     };
-  }
-
-  function waitForDom() {
-    if (document.body) return Promise.resolve();
-    return new Promise((resolve) => {
-      const started = Date.now();
-      const check = () => {
-        if (document.body || Date.now() - started > 10000) {
-          resolve();
-          return;
-        }
-        window.setTimeout(check, 50);
-      };
-      check();
-    });
-  }
-
-  function escapeHtml(value) {
-    return String(value == null ? "" : value)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#39;");
-  }
-
-  function sleep(ms, signal) {
-    return new Promise((resolve, reject) => {
-      let timer;
-      const onAbort = () => {
-        window.clearTimeout(timer);
-        if (signal) signal.removeEventListener("abort", onAbort);
-        const error = new Error("Aborted");
-        error.name = "AbortError";
-        reject(error);
-      };
-      const done = () => {
-        if (signal) signal.removeEventListener("abort", onAbort);
-        resolve();
-      };
-      timer = window.setTimeout(done, ms);
-      if (signal) {
-        if (signal.aborted) onAbort();
-        else signal.addEventListener("abort", onAbort, { once: true });
-      }
-    });
   }
 
   function normalizeCover(src) {
@@ -151,15 +86,104 @@
     return JSON.stringify(core);
   }
 
-  function firstPageSnapshot(items) {
+  function firstPageSnapshot(items, now = Date.now) {
     const normalized = uniqueItems(items);
     return {
       items: normalized,
       fingerprint: firstPageFingerprint(normalized),
-      checkedAt: Date.now(),
+      checkedAt: now(),
     };
   }
 
+  const STORAGE_PREFIX = "bangumi-ark-gacha";
+  class GachaStorage {
+    constructor(userId, subjectType, storage = localStorage) {
+      this.storage = storage;
+      this.userId = String(userId);
+      this.subjectType = String(subjectType);
+    }
+
+    listKey(status) {
+      return `${STORAGE_PREFIX}:list:${this.userId}:${this.subjectType}:${status}`;
+    }
+
+    metaKey(status) {
+      return `${STORAGE_PREFIX}:meta:${this.userId}:${this.subjectType}:${status}`;
+    }
+
+    subjectKey(subjectId) {
+      return `${STORAGE_PREFIX}:subject:${subjectId}`;
+    }
+
+    readJson(key, fallback) {
+      try {
+        const raw = this.storage.getItem(key);
+        return raw == null ? fallback : JSON.parse(raw);
+      } catch (error) {
+        return fallback;
+      }
+    }
+
+    writeJson(key, value) {
+      this.storage.setItem(key, JSON.stringify(value));
+    }
+
+    getItems(status) {
+      return uniqueItems(this.readJson(this.listKey(status), []));
+    }
+
+    getMeta(status) {
+      const meta = this.readJson(this.metaKey(status), null);
+      return meta && typeof meta === "object" ? meta : null;
+    }
+
+    getSubjectMeta(subjectId) {
+      const meta = this.readJson(this.subjectKey(subjectId), null);
+      return meta && typeof meta === "object" ? meta : null;
+    }
+
+    saveSubjectMeta(subjectId, meta) {
+      try {
+        this.writeJson(this.subjectKey(subjectId), meta);
+      } catch (error) {
+        console.warn("[Bangumi Ark Gacha] 评分缓存写入失败", error);
+      }
+    }
+
+    clearSubjectMeta(subjectIds) {
+      const ids = new Set((subjectIds || []).map(String).filter(Boolean));
+      ids.forEach((id) => this.storage.removeItem(this.subjectKey(id)));
+    }
+
+    commitStatus(status, items, meta) {
+      const listKey = this.listKey(status);
+      const metaKey = this.metaKey(status);
+      const listTempKey = `${listKey}:tmp`;
+      const metaTempKey = `${metaKey}:tmp`;
+      const oldList = this.storage.getItem(listKey);
+      const oldMeta = this.storage.getItem(metaKey);
+
+      try {
+        this.writeJson(listTempKey, uniqueItems(items));
+        this.writeJson(metaTempKey, meta);
+        this.storage.setItem(listKey, this.storage.getItem(listTempKey));
+        this.storage.setItem(metaKey, this.storage.getItem(metaTempKey));
+        this.storage.removeItem(listTempKey);
+        this.storage.removeItem(metaTempKey);
+      } catch (error) {
+        if (oldList == null) this.storage.removeItem(listKey);
+        else this.storage.setItem(listKey, oldList);
+        if (oldMeta == null) this.storage.removeItem(metaKey);
+        else this.storage.setItem(metaKey, oldMeta);
+        this.storage.removeItem(listTempKey);
+        this.storage.removeItem(metaTempKey);
+        throw error;
+      }
+    }
+  }
+
+  const PAGE_TIMEOUT_MS = 10000;
+  const SCORE_TIMEOUT_MS = 5000;
   function pageNumberFromHref(href) {
     try {
       const url = new URL(href, window.location.origin);
@@ -212,7 +236,7 @@
       .filter(Boolean);
   }
 
-  async function fetchText(url, options = {}) {
+  async function fetchText(url, options = {}, transport = fetch) {
     const { signal, timeoutMs = PAGE_TIMEOUT_MS, cache = "default" } = options;
     const controller = new AbortController();
     let timedOut = false;
@@ -229,7 +253,7 @@
     }
 
     try {
-      const response = await fetch(url, {
+      const response = await transport(url, {
         credentials: "same-origin",
         cache,
         signal: controller.signal,
@@ -246,89 +270,293 @@
     }
   }
 
-  class GachaStorage {
-    constructor(userId, subjectType) {
-      this.userId = String(userId);
-      this.subjectType = String(subjectType);
+  function createBangumiClient({
+    subjectType,
+    userId,
+    transport = fetch,
+    parse = (html) => new DOMParser().parseFromString(html, "text/html"),
+  }) {
+    return {
+      async fetchListPage(status, page, signal, noStore = false) {
+        const path = `/${subjectType}/list/${encodeURIComponent(userId)}/${status}`;
+        const url = page === 1 ? path : `${path}?page=${page}`;
+        const html = await fetchText(
+          url,
+          { signal, cache: noStore ? "no-store" : "default" },
+          transport,
+        );
+        const doc = parse(html);
+        return {
+          items: uniqueItems(parseListPage(doc)),
+          pageInfo: pageInfo(doc),
+        };
+      },
+      async fetchSubject(subjectId, signal) {
+        return parse(
+          await fetchText(
+            `/subject/${subjectId}`,
+            { signal, timeoutMs: SCORE_TIMEOUT_MS },
+            transport,
+          ),
+        );
+      },
+    };
+  }
+
+  const SCORE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+  const SUBJECT_CACHE_VERSION = 3;
+  class DrawEngine {
+    constructor({
+      storage,
+      client,
+      subjectType,
+      now = Date.now,
+      random = Math.random,
+    }) {
+      Object.assign(this, { storage, client, subjectType, now, random });
+    }
+    getCachedSubject(subjectId) {
+      const cached = this.storage.getSubjectMeta(subjectId);
+      if (
+        !cached ||
+        cached.version !== SUBJECT_CACHE_VERSION ||
+        !cached.fetchedAt
+      )
+        return null;
+      return this.now() - cached.fetchedAt <= SCORE_TTL_MS ? cached : null;
     }
 
-    listKey(status) {
-      return `${STORAGE_PREFIX}:list:${this.userId}:${this.subjectType}:${status}`;
+    extractScore(doc) {
+      const selectors = [
+        "#ChartWarpper .global_score .number",
+        "#ChartWarpper .global_score",
+        ".global_score .number",
+        ".global_rating .number",
+        ".global_score",
+      ];
+      for (const selector of selectors) {
+        const node = doc.querySelector(selector);
+        if (!node) continue;
+        const match = (node.textContent || "").match(
+          /(?:^|\s)(10(?:\.0)?|[0-9](?:\.[0-9])?)(?:\s|$)/,
+        );
+        if (match) return Number(match[1]);
+        const loose = (node.textContent || "").match(
+          /10(?:\.0)?|[0-9](?:\.[0-9])?/,
+        );
+        if (loose) return Number(loose[0]);
+      }
+      return null;
     }
 
-    metaKey(status) {
-      return `${STORAGE_PREFIX}:meta:${this.userId}:${this.subjectType}:${status}`;
+    extractInfoboxField(doc, patterns) {
+      const nodes = Array.from(
+        doc.querySelectorAll("#infobox li, .infobox li"),
+      );
+      const node = nodes.find((item) =>
+        patterns.some((pattern) => pattern.test(item.textContent || "")),
+      );
+      if (!node) return null;
+      const text = (node.textContent || "").replace(/\s+/g, " ").trim();
+      const colon = text.indexOf(":");
+      return colon >= 0 ? text.slice(colon + 1).trim() : text;
     }
 
-    subjectKey(subjectId) {
-      return `${STORAGE_PREFIX}:subject:${subjectId}`;
+    extractDateFromDocument(doc) {
+      return this.extractInfoboxField(doc, [
+        /放送开始/i,
+        /放送開始/i,
+        /上映年度/i,
+        /上映日期/i,
+        /上映日/i,
+        /发售日/i,
+        /发行日期/i,
+        /开始日期/i,
+        /release date/i,
+        /publish date/i,
+      ]);
     }
 
-    readJson(key, fallback) {
+    extractEpisodesFromDocument(doc) {
+      const value = this.extractInfoboxField(doc, [
+        /集数/i,
+        /话数/i,
+        /episodes?/i,
+        /总集数/i,
+      ]);
+      if (!value) return null;
+      const match = value.match(/\d+/);
+      return match ? Number(match[0]) : null;
+    }
+
+    normalizeDate(dateValue) {
+      if (!dateValue) return { date: null, isPartial: false };
+      const dateString = String(dateValue).trim().replace(/T.*$/, "");
+      const half = dateString.match(/^(\d{4})\s*[Hh]([12])$/);
+      if (half)
+        return {
+          date: `${half[1]}-${half[2] === "1" ? "01-01" : "07-01"}`,
+          isPartial: true,
+        };
+
+      const full = dateString.match(/^(\d{4})[-/]([01]?\d)[-/]([0-3]?\d)/);
+      if (full) {
+        const date = `${full[1]}-${full[2].padStart(2, "0")}-${full[3].padStart(2, "0")}`;
+        const parsed = new Date(`${date}T00:00:00`);
+        return Number.isNaN(parsed.getTime())
+          ? { date: null, isPartial: false }
+          : { date, isPartial: false };
+      }
+
+      const month = dateString.match(/^(\d{4})[-/]([01]?\d)$/);
+      if (month)
+        return {
+          date: `${month[1]}-${month[2].padStart(2, "0")}-01`,
+          isPartial: true,
+        };
+      const cnFull = dateString.match(
+        /^(\d{4})年\s*([01]?\d)月\s*([0-3]?\d)日$/,
+      );
+      if (cnFull) {
+        const date = `${cnFull[1]}-${cnFull[2].padStart(2, "0")}-${cnFull[3].padStart(2, "0")}`;
+        const parsed = new Date(`${date}T00:00:00`);
+        return Number.isNaN(parsed.getTime())
+          ? { date: null, isPartial: false }
+          : { date, isPartial: false };
+      }
+      const cnMonth = dateString.match(/^(\d{4})年\s*([01]?\d)月$/);
+      if (cnMonth)
+        return {
+          date: `${cnMonth[1]}-${cnMonth[2].padStart(2, "0")}-01`,
+          isPartial: true,
+        };
+      const year = dateString.match(/^(\d{4})(?:年)?$/);
+      if (year) return { date: `${year[1]}-01-01`, isPartial: true };
+      return { date: null, isPartial: false };
+    }
+
+    subjectInfoFromDocument(doc) {
+      const rawDate = this.extractDateFromDocument(doc);
+      const normalizedDate = this.normalizeDate(rawDate);
+      const score = this.extractScore(doc);
+      const totalEpisodes = this.extractEpisodesFromDocument(doc);
+      return {
+        score: Number.isFinite(score) && score > 0 ? score : null,
+        hasScore: Number.isFinite(score) && score > 0,
+        date: normalizedDate.date,
+        isPartial: normalizedDate.isPartial,
+        totalEpisodes,
+        resolved: true,
+        source: "subject",
+      };
+    }
+
+    async getSubjectInfo(subjectId, signal) {
+      const cached = this.getCachedSubject(subjectId);
+      if (cached) return cached;
+
       try {
-        const raw = localStorage.getItem(key);
-        return raw == null ? fallback : JSON.parse(raw);
+        const html = await this.client.fetchSubject(subjectId, signal);
+        const subjectResult = this.subjectInfoFromDocument(html);
+        const stored = {
+          version: SUBJECT_CACHE_VERSION,
+          subjectId,
+          fetchedAt: this.now(),
+          ...subjectResult,
+        };
+        this.storage.saveSubjectMeta(subjectId, stored);
+        return stored;
       } catch (error) {
-        return fallback;
+        if (error.name === "AbortError") throw error;
+        return {
+          version: SUBJECT_CACHE_VERSION,
+          subjectId,
+          fetchedAt: 0,
+          score: null,
+          hasScore: false,
+          date: null,
+          isPartial: false,
+          totalEpisodes: null,
+          resolved: false,
+          source: "error",
+          error: error.message || "评分请求失败",
+        };
       }
     }
 
-    writeJson(key, value) {
-      localStorage.setItem(key, JSON.stringify(value));
+    getStar(info) {
+      if (!info || !info.hasScore || !info.date) return 0;
+      const releaseDate = new Date(`${info.date}T00:00:00`);
+      if (
+        Number.isNaN(releaseDate.getTime()) ||
+        releaseDate.getTime() > this.now()
+      )
+        return 0;
+
+      const currentYear = new Date(this.now()).getFullYear();
+      const dateYear = Number(String(info.date).slice(0, 4));
+      if (info.isPartial && dateYear === currentYear) return 0;
+      if (!info.isPartial && info.date === `${currentYear}-01-01`) return 0;
+      if (
+        this.subjectType === "anime" &&
+        (!Number.isFinite(info.totalEpisodes) || info.totalEpisodes === 0)
+      )
+        return 0;
+
+      if (info.score >= 8) return 6;
+      if (info.score >= 7) return 5;
+      if (info.score >= 6) return 4;
+      if (info.score >= 5) return 3;
+      if (info.score >= 4) return 2;
+      return 1;
     }
 
-    getItems(status) {
-      return uniqueItems(this.readJson(this.listKey(status), []));
-    }
-
-    getMeta(status) {
-      const meta = this.readJson(this.metaKey(status), null);
-      return meta && typeof meta === "object" ? meta : null;
-    }
-
-    getSubjectMeta(subjectId) {
-      const meta = this.readJson(this.subjectKey(subjectId), null);
-      return meta && typeof meta === "object" ? meta : null;
-    }
-
-    saveSubjectMeta(subjectId, meta) {
-      try {
-        this.writeJson(this.subjectKey(subjectId), meta);
-      } catch (error) {
-        console.warn("[Bangumi Ark Gacha] 评分缓存写入失败", error);
+    shuffle(items) {
+      const result = [...items];
+      for (let index = result.length - 1; index > 0; index -= 1) {
+        const swapIndex = Math.floor(this.random() * (index + 1));
+        [result[index], result[swapIndex]] = [result[swapIndex], result[index]];
       }
+      return result;
     }
 
-    clearSubjectMeta(subjectIds) {
-      const ids = new Set((subjectIds || []).map(String).filter(Boolean));
-      ids.forEach((id) => localStorage.removeItem(this.subjectKey(id)));
+    async cards(items, count, signal) {
+      const selected = this.shuffle(items).slice(0, count);
+      return Promise.all(
+        selected.map(async (item) => {
+          try {
+            const info = await this.getSubjectInfo(
+              subjectIdFromLink(item.link) || item.id,
+              signal,
+            );
+            return { ...item, info, star: this.getStar(info) };
+          } catch (error) {
+            if (error.name === "AbortError") throw error;
+            return {
+              ...item,
+              info: {
+                hasScore: false,
+                score: null,
+                date: null,
+                totalEpisodes: null,
+                source: "error",
+                resolved: false,
+              },
+              star: 0,
+            };
+          }
+        }),
+      );
     }
+  }
 
-    commitStatus(status, items, meta) {
-      const listKey = this.listKey(status);
-      const metaKey = this.metaKey(status);
-      const listTempKey = `${listKey}:tmp`;
-      const metaTempKey = `${metaKey}:tmp`;
-      const oldList = localStorage.getItem(listKey);
-      const oldMeta = localStorage.getItem(metaKey);
-
-      try {
-        this.writeJson(listTempKey, uniqueItems(items));
-        this.writeJson(metaTempKey, meta);
-        localStorage.setItem(listKey, localStorage.getItem(listTempKey));
-        localStorage.setItem(metaKey, localStorage.getItem(metaTempKey));
-        localStorage.removeItem(listTempKey);
-        localStorage.removeItem(metaTempKey);
-      } catch (error) {
-        if (oldList == null) localStorage.removeItem(listKey);
-        else localStorage.setItem(listKey, oldList);
-        if (oldMeta == null) localStorage.removeItem(metaKey);
-        else localStorage.setItem(metaKey, oldMeta);
-        localStorage.removeItem(listTempKey);
-        localStorage.removeItem(metaTempKey);
-        throw error;
-      }
-    }
+  function escapeHtml(value) {
+    return String(value == null ? "" : value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
   }
 
   const CSS = `
@@ -516,28 +744,16 @@
         }
     `;
 
-  class GachaApp {
-    constructor(appRoute) {
-      this.userId = appRoute.userId;
-      this.subjectType = appRoute.subjectType;
-      this.currentStatus = appRoute.status;
-      this.statusLabels = statusLabelsFor(this.subjectType);
-      this.storage = new GachaStorage(this.userId, this.subjectType);
-      this.pool = [];
+  class GachaView {
+    constructor(session) {
+      this.session = session;
       this.logs = [];
-      this.flowId = 0;
-      this.abortController = null;
-      this.drawAbortController = null;
       this.titleHeightFrame = null;
-      this.busy = false;
-      this.loaded = false;
-      this.pendingChanges = [];
       this.renderStyles();
       this.renderLauncher();
       this.renderModal();
       window.addEventListener("resize", () => this.scheduleTitleHeightSync());
     }
-
     renderStyles() {
       if (document.querySelector("style[data-bangumi-ark-gacha-style]")) return;
       const style = document.createElement("style");
@@ -555,7 +771,7 @@
       launcher.title = "打开收藏扭蛋机";
       launcher.addEventListener("click", () => {
         this.toggleModal(true);
-        if (!this.loaded && !this.busy) this.loadView();
+        this.session.open();
       });
       document.body.appendChild(launcher);
       this.launcher = launcher;
@@ -571,7 +787,7 @@
                         ${["all", ...STATUS_IDS]
                           .map(
                             (status) => `
-                            <button type="button" class="ark-gacha-tab ${status === this.currentStatus ? "active" : ""}" data-status="${status}">${this.statusLabels[status]}</button>
+                            <button type="button" class="ark-gacha-tab ${status === this.session.currentStatus ? "active" : ""}" data-status="${status}">${this.session.statusLabels[status]}</button>
                         `,
                           )
                           .join("")}
@@ -617,54 +833,25 @@
 
       mask.querySelectorAll(".ark-gacha-tab").forEach((tab) => {
         tab.addEventListener("click", () =>
-          this.selectStatus(tab.dataset.status),
+          this.session.selectStatus(tab.dataset.status),
         );
       });
       mask.addEventListener("click", (event) => {
         if (event.target === mask) this.toggleModal(false);
       });
-      this.ui.refresh.addEventListener("click", () => this.forceRefresh());
-      this.ui.stop.addEventListener("click", () => this.stopOperations());
-      this.ui.run3.addEventListener("click", () => this.draw(3));
-      this.ui.run10.addEventListener("click", () => this.draw(10));
+      this.ui.refresh.addEventListener("click", () =>
+        this.session.forceRefresh(),
+      );
+      this.ui.stop.addEventListener("click", () =>
+        this.session.stopOperations(),
+      );
+      this.ui.run3.addEventListener("click", () => this.session.draw(3));
+      this.ui.run10.addEventListener("click", () => this.session.draw(10));
     }
 
     toggleModal(open) {
       this.ui.mask.style.display = open ? "flex" : "none";
       if (open) this.scheduleTitleHeightSync();
-    }
-
-    targetStatuses() {
-      return this.currentStatus === "all"
-        ? [...STATUS_IDS]
-        : [this.currentStatus];
-    }
-
-    selectStatus(status) {
-      if (!STATUS_IDS.includes(status) && status !== "all") return;
-      this.stopOperations(false);
-      this.currentStatus = status;
-      this.ui.mask.querySelectorAll(".ark-gacha-tab").forEach((tab) => {
-        tab.classList.toggle("active", tab.dataset.status === status);
-      });
-      this.loaded = false;
-      this.loadView();
-    }
-
-    isActive(flowId) {
-      return flowId === this.flowId;
-    }
-
-    stopOperations(showMessage = true) {
-      ++this.flowId;
-      if (this.abortController) this.abortController.abort();
-      if (this.drawAbortController) this.drawAbortController.abort();
-      this.abortController = null;
-      this.drawAbortController = null;
-      this.busy = false;
-      this.ui.progressWrap.hidden = true;
-      this.updateButtons();
-      if (showMessage) this.setStatus("已停止当前操作", true);
     }
 
     setStatus(message, error = false) {
@@ -722,265 +909,59 @@
     }
 
     updateInfo(suffix = "") {
-      this.ui.info.textContent = `POOL: ${this.pool.length}${suffix ? ` ${suffix}` : ""}`;
+      this.ui.info.textContent = `POOL: ${this.session.pool.length}${suffix ? ` ${suffix}` : ""}`;
     }
 
     updateButtons() {
-      const disabled = this.busy || this.pool.length === 0;
-      this.ui.run3.disabled = disabled || this.pool.length < 3;
-      this.ui.run10.disabled = disabled || this.pool.length < 10;
-      this.ui.refresh.disabled = this.busy;
+      const disabled = this.session.busy || this.session.pool.length === 0;
+      this.ui.run3.disabled = disabled || this.session.pool.length < 3;
+      this.ui.run10.disabled = disabled || this.session.pool.length < 10;
+      this.ui.refresh.disabled = this.session.busy;
     }
 
-    async loadPool(statuses) {
-      const pools = [];
-      for (const status of statuses)
-        pools.push(...this.storage.getItems(status));
-      this.pool = uniqueItems(pools);
-      this.updateInfo();
-      this.updateButtons();
+    setProgressVisible(visible) {
+      this.ui.progressWrap.hidden = !visible;
     }
 
-    createController() {
-      if (this.abortController) this.abortController.abort();
-      this.abortController = new AbortController();
-      return this.abortController;
-    }
-
-    async loadView() {
-      this.stopOperations(false);
-      const flowId = this.flowId;
-      this.pendingChanges = [];
-      this.hideConfirm();
-      this.clearLogs();
-      this.setResultMessage("读取本地缓存中...");
-      this.setStatus("读取本地缓存中...");
-      this.ui.progressWrap.hidden = false;
-      this.busy = true;
-      this.updateButtons();
-
-      const statuses = this.targetStatuses();
-      await this.loadPool(statuses);
-      if (!this.isActive(flowId)) return;
-
-      const missing = statuses.filter((status) => {
-        return !this.storage.getMeta(status);
+    selectStatus(status) {
+      this.ui.mask.querySelectorAll(".ark-gacha-tab").forEach((tab) => {
+        tab.classList.toggle("active", tab.dataset.status === status);
       });
+    }
 
-      if (this.pool.length > 0)
-        this.setResultMessage("缓存已载入，正在后台核验最新第一页...");
+    setShuffling(shuffling) {
+      this.ui.result.classList.toggle("ark-gacha-shuffling", shuffling);
+    }
 
-      let controller = null;
-      try {
-        if (missing.length) {
-          this.setStatus("首次使用，开始全量同步...");
-          controller = this.createController();
-          await this.syncStatuses(missing, {
-            signal: controller.signal,
-            manual: false,
-            flowId,
-          });
-          if (!this.isActive(flowId)) return;
-          await this.loadPool(statuses);
-        }
+    showPreparingCards(count) {
+      this.ui.result.className = `ark-gacha-result-grid${count === 10 ? " ten-gacha" : ""}`;
+      this.ui.result.innerHTML =
+        '<div class="ark-gacha-message">正在获取选中条目的评分...</div>';
+    }
 
-        this.busy = false;
-        this.ui.progressWrap.hidden = true;
-        this.loaded = true;
-        this.updateButtons();
-        if (this.pool.length)
-          this.setResultMessage("数据已就绪，选择三连或十连开始抽卡");
-        else this.setResultMessage("该收藏状态暂无条目");
-        this.setStatus(
-          missing.length ? "✅ 全量同步完成" : "缓存可用，后台核验中",
+    showCards(cardData, count) {
+      this.ui.result.replaceChildren();
+      cardData.forEach((data, index) => {
+        const card = this.createCard(data);
+        this.ui.result.appendChild(card);
+        window.setTimeout(
+          () => card.classList.add("card-enter"),
+          index * (count === 10 ? 120 : 260),
         );
-
-        if (this.isActive(flowId)) this.startValidation(statuses, flowId);
-      } catch (error) {
-        if (!this.isActive(flowId)) return;
-        if (error.name === "AbortError") {
-          this.setStatus("已停止同步", true);
-        } else {
-          this.addLog(`同步失败：${error.message}`, true);
-          this.setStatus("同步失败，仍保留可用缓存", true);
-          if (this.pool.length)
-            this.setResultMessage("同步失败，当前仍可使用本地缓存");
-          else this.setResultMessage("暂无可用缓存，请检查网络后刷新");
-        }
-        this.busy = false;
-        this.ui.progressWrap.hidden = true;
-        this.updateButtons();
-      } finally {
-        if (this.abortController === controller) this.abortController = null;
-      }
-    }
-
-    async fetchListPage(status, page, signal, noStore = false) {
-      const path = `/${this.subjectType}/list/${encodeURIComponent(this.userId)}/${status}`;
-      const url = page === 1 ? path : `${path}?page=${page}`;
-      const html = await fetchText(url, {
-        signal,
-        cache: noStore ? "no-store" : "default",
       });
-      const doc = new DOMParser().parseFromString(html, "text/html");
-      return {
-        items: uniqueItems(parseListPage(doc)),
-        pageInfo: pageInfo(doc),
-      };
+      this.scheduleTitleHeightSync();
+      if (document.fonts?.ready)
+        document.fonts.ready.then(() => this.scheduleTitleHeightSync());
     }
 
-    async fetchAllStatus(status, signal) {
-      const statusName = this.statusLabels[status] || status;
-      this.setStatus(`同步 [${statusName}] 第 1 页...`);
-      const first = await this.fetchListPage(status, 1, signal, true);
-      const allItems = [...first.items];
-      const seenPageSignatures = new Set([firstPageFingerprint(first.items)]);
-      const { totalPages, reliable } = first.pageInfo;
-      const upperBound = reliable ? totalPages : MAX_FALLBACK_PAGES;
-
-      if (reliable) {
-        for (let page = 2; page <= totalPages; page += 1) {
-          if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-          await sleep(FETCH_INTERVAL_MS, signal);
-          this.setStatus(`同步 [${statusName}] 第 ${page}/${totalPages} 页...`);
-          const result = await this.fetchListPage(status, page, signal, true);
-          if (!result.items.length) {
-            if (page < totalPages)
-              throw new Error(`第 ${page} 页为空，分页数据可能不完整`);
-            break;
-          }
-          const signature = firstPageFingerprint(result.items);
-          if (seenPageSignatures.has(signature))
-            throw new Error(`第 ${page} 页重复，已停止以保护旧缓存`);
-          seenPageSignatures.add(signature);
-          allItems.push(...result.items);
-        }
-      } else {
-        let page = 2;
-        while (page <= upperBound) {
-          if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-          await sleep(FETCH_INTERVAL_MS, signal);
-          this.setStatus(
-            `同步 [${statusName}] 第 ${page} 页（未发现可靠末页）...`,
-          );
-          const result = await this.fetchListPage(status, page, signal, true);
-          if (!result.items.length) break;
-          const signature = firstPageFingerprint(result.items);
-          if (seenPageSignatures.has(signature)) {
-            throw new Error(`第 ${page} 页重复，无法确认分页末页`);
-          }
-          seenPageSignatures.add(signature);
-          allItems.push(...result.items);
-          page += 1;
-        }
-        if (page > MAX_FALLBACK_PAGES)
-          throw new Error("分页超过安全上限，已停止同步");
-      }
-
-      const items = uniqueItems(allItems);
-      return {
-        items,
-        totalPages: reliable
-          ? totalPages
-          : Math.max(1, seenPageSignatures.size),
-        snapshot: firstPageSnapshot(first.items),
-      };
-    }
-
-    async syncStatuses(statuses, options) {
-      const { signal, manual = false, flowId = this.flowId } = options;
-      this.busy = true;
-      this.ui.progressWrap.hidden = false;
-      this.updateButtons();
-
-      for (const status of statuses) {
-        if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-        if (!this.isActive(flowId))
-          throw new DOMException("Aborted", "AbortError");
-
-        const oldItems = this.storage.getItems(status);
-        const result = await this.fetchAllStatus(status, signal);
-        if (signal.aborted || !this.isActive(flowId))
-          throw new DOMException("Aborted", "AbortError");
-        const meta = {
-          version: 2,
-          totalPages: result.totalPages,
-          fingerprint: result.snapshot.fingerprint,
-          firstPage: result.snapshot.items,
-          checkedAt: Date.now(),
-          updatedAt: Date.now(),
-        };
-
-        this.storage.commitStatus(status, result.items, meta);
-        if (manual) {
-          const ids = [...oldItems, ...result.items].map((item) => item.id);
-          this.storage.clearSubjectMeta(ids);
-        }
-        await this.loadPool(this.targetStatuses());
-      }
-    }
-
-    async startValidation(statuses, flowId) {
-      if (!this.isActive(flowId) || this.busy) return;
-      const controller = this.createController();
-      this.ui.progressWrap.hidden = false;
-      const changes = [];
-
-      try {
-        for (const status of statuses) {
-          if (controller.signal.aborted)
-            throw new DOMException("Aborted", "AbortError");
-          const meta = this.storage.getMeta(status);
-          if (!meta) continue;
-
-          const statusName = this.statusLabels[status] || status;
-          this.setStatus(`核验 [${statusName}] 最新第一页...`);
-          const remote = await this.fetchListPage(
-            status,
-            1,
-            controller.signal,
-            true,
-          );
-          if (controller.signal.aborted || !this.isActive(flowId)) return;
-          const snapshot = firstPageSnapshot(remote.items);
-          const sameAsAccepted = snapshot.fingerprint === meta.fingerprint;
-
-          if (sameAsAccepted) {
-            meta.checkedAt = Date.now();
-            this.storage.writeJson(this.storage.metaKey(status), meta);
-          } else {
-            changes.push({
-              status,
-              snapshot,
-              totalPages: remote.pageInfo.totalPages,
-            });
-          }
-        }
-
-        if (changes.length && this.isActive(flowId)) {
-          this.pendingChanges = changes;
-          this.showConfirm(changes);
-          this.setStatus(`发现 ${changes.length} 个状态有变化，请选择同步方式`);
-        } else if (this.isActive(flowId)) {
-          this.setStatus("✅ 最新第一页核验完成");
-        }
-      } catch (error) {
-        if (this.isActive(flowId) && error.name !== "AbortError") {
-          this.addLog(`后台核验失败：${error.message}`, true);
-          this.setStatus("后台核验失败，继续使用本地缓存", true);
-        }
-      } finally {
-        if (this.isActive(flowId)) {
-          if (this.abortController === controller) this.abortController = null;
-          this.ui.progressWrap.hidden = true;
-          this.updateButtons();
-        }
-      }
+    hideConfirm() {
+      this.ui.confirm.hidden = true;
+      this.ui.confirm.replaceChildren();
     }
 
     showConfirm(changes) {
       const names = changes
-        .map((change) => this.statusLabels[change.status])
+        .map((change) => this.session.statusLabels[change.status])
         .join("、");
       this.ui.confirm.hidden = false;
       this.ui.confirm.innerHTML = `
@@ -992,314 +973,10 @@
             `;
       this.ui.confirm
         .querySelector('[data-action="keep"]')
-        .addEventListener("click", () => this.keepCachedChanges());
+        .addEventListener("click", () => this.session.keepCachedChanges());
       this.ui.confirm
         .querySelector('[data-action="refresh"]')
-        .addEventListener("click", () => this.refreshDetectedChanges());
-    }
-
-    hideConfirm() {
-      this.ui.confirm.hidden = true;
-      this.ui.confirm.replaceChildren();
-    }
-
-    keepCachedChanges() {
-      this.pendingChanges = [];
-      this.hideConfirm();
-      this.setStatus("已保留本地缓存，下次核验时会再次提示");
-    }
-
-    async refreshDetectedChanges() {
-      const changes = this.pendingChanges.splice(0);
-      this.hideConfirm();
-      if (!changes.length) return;
-      const flowId = ++this.flowId;
-      const controller = this.createController();
-      this.setResultMessage("变化状态全量更新中...");
-      try {
-        await this.syncStatuses(
-          changes.map((change) => change.status),
-          {
-            signal: controller.signal,
-            manual: false,
-            flowId,
-          },
-        );
-        if (!this.isActive(flowId)) return;
-        this.loaded = true;
-        this.ui.progressWrap.hidden = true;
-        this.setResultMessage("✅ 变化状态已更新，可以继续抽卡");
-        this.setStatus("✅ 变化状态全量更新完成");
-      } catch (error) {
-        if (!this.isActive(flowId)) return;
-        if (error.name === "AbortError") this.setStatus("已停止全量更新", true);
-        else {
-          this.addLog(`全量更新失败：${error.message}`, true);
-          this.setStatus("更新失败，继续使用旧缓存", true);
-          this.setResultMessage("更新失败，当前仍可使用旧缓存");
-        }
-      } finally {
-        if (!this.isActive(flowId)) return;
-        if (this.abortController === controller) this.abortController = null;
-        this.busy = false;
-        this.ui.progressWrap.hidden = true;
-        this.updateButtons();
-      }
-    }
-
-    async forceRefresh() {
-      if (this.busy) this.stopOperations(false);
-      this.pendingChanges = [];
-      this.hideConfirm();
-      const statuses = this.targetStatuses();
-      const flowId = ++this.flowId;
-      const controller = this.createController();
-      this.clearLogs();
-      this.setResultMessage("准备清理当前作用域并全量刷新...");
-      this.setStatus("全量刷新中...");
-      try {
-        await this.syncStatuses(statuses, {
-          signal: controller.signal,
-          manual: true,
-          flowId,
-        });
-        await this.loadPool(statuses);
-        if (!this.isActive(flowId)) return;
-        this.loaded = true;
-        this.setResultMessage(
-          this.pool.length ? "✅ 全量刷新完成，可以抽卡" : "该收藏状态暂无条目",
-        );
-        this.setStatus("✅ 全量刷新完成");
-      } catch (error) {
-        if (!this.isActive(flowId)) return;
-        if (error.name === "AbortError") this.setStatus("已停止全量刷新", true);
-        else {
-          this.addLog(`全量刷新失败：${error.message}`, true);
-          this.setStatus("刷新失败，已保留旧缓存", true);
-          this.setResultMessage(
-            this.pool.length
-              ? "刷新失败，当前仍可使用旧缓存"
-              : "刷新失败，请稍后重试",
-          );
-        }
-      } finally {
-        if (!this.isActive(flowId)) return;
-        if (this.abortController === controller) this.abortController = null;
-        this.busy = false;
-        this.ui.progressWrap.hidden = true;
-        this.updateButtons();
-      }
-    }
-
-    getCachedSubject(subjectId) {
-      const cached = this.storage.getSubjectMeta(subjectId);
-      if (
-        !cached ||
-        cached.version !== SUBJECT_CACHE_VERSION ||
-        !cached.fetchedAt
-      )
-        return null;
-      return Date.now() - cached.fetchedAt <= SCORE_TTL_MS ? cached : null;
-    }
-
-    extractScore(doc) {
-      const selectors = [
-        "#ChartWarpper .global_score .number",
-        "#ChartWarpper .global_score",
-        ".global_score .number",
-        ".global_rating .number",
-        ".global_score",
-      ];
-      for (const selector of selectors) {
-        const node = doc.querySelector(selector);
-        if (!node) continue;
-        const match = (node.textContent || "").match(
-          /(?:^|\s)(10(?:\.0)?|[0-9](?:\.[0-9])?)(?:\s|$)/,
-        );
-        if (match) return Number(match[1]);
-        const loose = (node.textContent || "").match(
-          /10(?:\.0)?|[0-9](?:\.[0-9])?/,
-        );
-        if (loose) return Number(loose[0]);
-      }
-      return null;
-    }
-
-    extractInfoboxField(doc, patterns) {
-      const nodes = Array.from(
-        doc.querySelectorAll("#infobox li, .infobox li"),
-      );
-      const node = nodes.find((item) =>
-        patterns.some((pattern) => pattern.test(item.textContent || "")),
-      );
-      if (!node) return null;
-      const text = (node.textContent || "").replace(/\s+/g, " ").trim();
-      const colon = text.indexOf(":");
-      return colon >= 0 ? text.slice(colon + 1).trim() : text;
-    }
-
-    extractDateFromDocument(doc) {
-      return this.extractInfoboxField(doc, [
-        /放送开始/i,
-        /放送開始/i,
-        /上映年度/i,
-        /上映日期/i,
-        /上映日/i,
-        /发售日/i,
-        /发行日期/i,
-        /开始日期/i,
-        /release date/i,
-        /publish date/i,
-      ]);
-    }
-
-    extractEpisodesFromDocument(doc) {
-      const value = this.extractInfoboxField(doc, [
-        /集数/i,
-        /话数/i,
-        /episodes?/i,
-        /总集数/i,
-      ]);
-      if (!value) return null;
-      const match = value.match(/\d+/);
-      return match ? Number(match[0]) : null;
-    }
-
-    normalizeDate(dateValue) {
-      if (!dateValue) return { date: null, isPartial: false };
-      const dateString = String(dateValue).trim().replace(/T.*$/, "");
-      const half = dateString.match(/^(\d{4})\s*[Hh]([12])$/);
-      if (half)
-        return {
-          date: `${half[1]}-${half[2] === "1" ? "01-01" : "07-01"}`,
-          isPartial: true,
-        };
-
-      const full = dateString.match(/^(\d{4})[-/]([01]?\d)[-/]([0-3]?\d)/);
-      if (full) {
-        const date = `${full[1]}-${full[2].padStart(2, "0")}-${full[3].padStart(2, "0")}`;
-        const parsed = new Date(`${date}T00:00:00`);
-        return Number.isNaN(parsed.getTime())
-          ? { date: null, isPartial: false }
-          : { date, isPartial: false };
-      }
-
-      const month = dateString.match(/^(\d{4})[-/]([01]?\d)$/);
-      if (month)
-        return {
-          date: `${month[1]}-${month[2].padStart(2, "0")}-01`,
-          isPartial: true,
-        };
-      const cnFull = dateString.match(
-        /^(\d{4})年\s*([01]?\d)月\s*([0-3]?\d)日$/,
-      );
-      if (cnFull) {
-        const date = `${cnFull[1]}-${cnFull[2].padStart(2, "0")}-${cnFull[3].padStart(2, "0")}`;
-        const parsed = new Date(`${date}T00:00:00`);
-        return Number.isNaN(parsed.getTime())
-          ? { date: null, isPartial: false }
-          : { date, isPartial: false };
-      }
-      const cnMonth = dateString.match(/^(\d{4})年\s*([01]?\d)月$/);
-      if (cnMonth)
-        return {
-          date: `${cnMonth[1]}-${cnMonth[2].padStart(2, "0")}-01`,
-          isPartial: true,
-        };
-      const year = dateString.match(/^(\d{4})(?:年)?$/);
-      if (year) return { date: `${year[1]}-01-01`, isPartial: true };
-      return { date: null, isPartial: false };
-    }
-
-    subjectInfoFromDocument(doc) {
-      const rawDate = this.extractDateFromDocument(doc);
-      const normalizedDate = this.normalizeDate(rawDate);
-      const score = this.extractScore(doc);
-      const totalEpisodes = this.extractEpisodesFromDocument(doc);
-      return {
-        score: Number.isFinite(score) && score > 0 ? score : null,
-        hasScore: Number.isFinite(score) && score > 0,
-        date: normalizedDate.date,
-        isPartial: normalizedDate.isPartial,
-        totalEpisodes,
-        resolved: true,
-        source: "subject",
-      };
-    }
-
-    async getSubjectInfo(subjectId, signal) {
-      const cached = this.getCachedSubject(subjectId);
-      if (cached) return cached;
-
-      try {
-        const html = await fetchText(`/subject/${subjectId}`, {
-          signal,
-          timeoutMs: SCORE_TIMEOUT_MS,
-          cache: "default",
-        });
-        const subjectResult = this.subjectInfoFromDocument(
-          new DOMParser().parseFromString(html, "text/html"),
-        );
-        const stored = {
-          version: SUBJECT_CACHE_VERSION,
-          subjectId,
-          fetchedAt: Date.now(),
-          ...subjectResult,
-        };
-        this.storage.saveSubjectMeta(subjectId, stored);
-        return stored;
-      } catch (error) {
-        if (error.name === "AbortError") throw error;
-        return {
-          version: SUBJECT_CACHE_VERSION,
-          subjectId,
-          fetchedAt: 0,
-          score: null,
-          hasScore: false,
-          date: null,
-          isPartial: false,
-          totalEpisodes: null,
-          resolved: false,
-          source: "error",
-          error: error.message || "评分请求失败",
-        };
-      }
-    }
-
-    getStar(info) {
-      if (!info || !info.hasScore || !info.date) return 0;
-      const releaseDate = new Date(`${info.date}T00:00:00`);
-      if (
-        Number.isNaN(releaseDate.getTime()) ||
-        releaseDate.getTime() > Date.now()
-      )
-        return 0;
-
-      const currentYear = new Date().getFullYear();
-      const dateYear = Number(String(info.date).slice(0, 4));
-      if (info.isPartial && dateYear === currentYear) return 0;
-      if (!info.isPartial && info.date === `${currentYear}-01-01`) return 0;
-      if (
-        this.subjectType === "anime" &&
-        (!Number.isFinite(info.totalEpisodes) || info.totalEpisodes === 0)
-      )
-        return 0;
-
-      if (info.score >= 8) return 6;
-      if (info.score >= 7) return 5;
-      if (info.score >= 6) return 4;
-      if (info.score >= 5) return 3;
-      if (info.score >= 4) return 2;
-      return 1;
-    }
-
-    shuffle(items) {
-      const result = [...items];
-      for (let index = result.length - 1; index > 0; index -= 1) {
-        const swapIndex = Math.floor(Math.random() * (index + 1));
-        [result[index], result[swapIndex]] = [result[swapIndex], result[index]];
-      }
-      return result;
+        .addEventListener("click", () => this.session.refreshDetectedChanges());
     }
 
     createCard(data) {
@@ -1357,101 +1034,522 @@
       });
       return card;
     }
+  }
+
+  const FETCH_INTERVAL_MS = 350;
+  const MAX_FALLBACK_PAGES = 10000;
+  function sleep(ms, signal) {
+    return new Promise((resolve, reject) => {
+      let timer;
+      const onAbort = () => {
+        window.clearTimeout(timer);
+        if (signal) signal.removeEventListener("abort", onAbort);
+        const error = new Error("Aborted");
+        error.name = "AbortError";
+        reject(error);
+      };
+      const done = () => {
+        if (signal) signal.removeEventListener("abort", onAbort);
+        resolve();
+      };
+      timer = window.setTimeout(done, ms);
+      if (signal) {
+        if (signal.aborted) onAbort();
+        else signal.addEventListener("abort", onAbort, { once: true });
+      }
+    });
+  }
+
+  class GachaSession {
+    constructor(
+      appRoute,
+      {
+        storage,
+        client,
+        now = Date.now,
+        random = Math.random,
+        createView = (session) => new GachaView(session),
+      } = {},
+    ) {
+      this.userId = appRoute.userId;
+      this.subjectType = appRoute.subjectType;
+      this.currentStatus = appRoute.status;
+      this.statusLabels = statusLabelsFor(this.subjectType);
+      this.storage = storage || new GachaStorage(this.userId, this.subjectType);
+      this.client = client || createBangumiClient(appRoute);
+      this.now = now;
+      this.engine = new DrawEngine({
+        storage: this.storage,
+        client: this.client,
+        subjectType: this.subjectType,
+        now,
+        random,
+      });
+      this.pool = [];
+      this.logs = [];
+      this.flowId = 0;
+      this.abortController = null;
+      this.drawAbortController = null;
+      this.titleHeightFrame = null;
+      this.busy = false;
+      this.loaded = false;
+      this.pendingChanges = [];
+      this.view = createView(this);
+    }
+
+    open() {
+      if (!this.loaded && !this.busy) this.loadView();
+    }
+
+    targetStatuses() {
+      return this.currentStatus === "all"
+        ? [...STATUS_IDS]
+        : [this.currentStatus];
+    }
+
+    selectStatus(status) {
+      if (!STATUS_IDS.includes(status) && status !== "all") return;
+      this.stopOperations(false);
+      this.currentStatus = status;
+      this.view.selectStatus(status);
+      this.loaded = false;
+      this.loadView();
+    }
+
+    isActive(flowId) {
+      return flowId === this.flowId;
+    }
+
+    stopOperations(showMessage = true) {
+      ++this.flowId;
+      if (this.abortController) this.abortController.abort();
+      if (this.drawAbortController) this.drawAbortController.abort();
+      this.abortController = null;
+      this.drawAbortController = null;
+      this.busy = false;
+      this.view.setProgressVisible(false);
+      this.view.updateButtons();
+      if (showMessage) this.view.setStatus("已停止当前操作", true);
+    }
+
+    async loadPool(statuses) {
+      const pools = [];
+      for (const status of statuses)
+        pools.push(...this.storage.getItems(status));
+      this.pool = uniqueItems(pools);
+      this.view.updateInfo();
+      this.view.updateButtons();
+    }
+
+    createController() {
+      if (this.abortController) this.abortController.abort();
+      this.abortController = new AbortController();
+      return this.abortController;
+    }
+
+    async loadView() {
+      this.stopOperations(false);
+      const flowId = this.flowId;
+      this.pendingChanges = [];
+      this.view.hideConfirm();
+      this.view.clearLogs();
+      this.view.setResultMessage("读取本地缓存中...");
+      this.view.setStatus("读取本地缓存中...");
+      this.view.setProgressVisible(true);
+      this.busy = true;
+      this.view.updateButtons();
+
+      const statuses = this.targetStatuses();
+      await this.loadPool(statuses);
+      if (!this.isActive(flowId)) return;
+
+      const missing = statuses.filter((status) => {
+        return !this.storage.getMeta(status);
+      });
+
+      if (this.pool.length > 0)
+        this.view.setResultMessage("缓存已载入，正在后台核验最新第一页...");
+
+      let controller = null;
+      try {
+        if (missing.length) {
+          this.view.setStatus("首次使用，开始全量同步...");
+          controller = this.createController();
+          await this.syncStatuses(missing, {
+            signal: controller.signal,
+            manual: false,
+            flowId,
+          });
+          if (!this.isActive(flowId)) return;
+          await this.loadPool(statuses);
+        }
+
+        this.busy = false;
+        this.view.setProgressVisible(false);
+        this.loaded = true;
+        this.view.updateButtons();
+        if (this.pool.length)
+          this.view.setResultMessage("数据已就绪，选择三连或十连开始抽卡");
+        else this.view.setResultMessage("该收藏状态暂无条目");
+        this.view.setStatus(
+          missing.length ? "✅ 全量同步完成" : "缓存可用，后台核验中",
+        );
+
+        if (this.isActive(flowId)) this.startValidation(statuses, flowId);
+      } catch (error) {
+        if (!this.isActive(flowId)) return;
+        if (error.name === "AbortError") {
+          this.view.setStatus("已停止同步", true);
+        } else {
+          this.view.addLog(`同步失败：${error.message}`, true);
+          this.view.setStatus("同步失败，仍保留可用缓存", true);
+          if (this.pool.length)
+            this.view.setResultMessage("同步失败，当前仍可使用本地缓存");
+          else this.view.setResultMessage("暂无可用缓存，请检查网络后刷新");
+        }
+        this.busy = false;
+        this.view.setProgressVisible(false);
+        this.view.updateButtons();
+      } finally {
+        if (this.abortController === controller) this.abortController = null;
+      }
+    }
+
+    async fetchAllStatus(status, signal) {
+      const statusName = this.statusLabels[status] || status;
+      this.view.setStatus(`同步 [${statusName}] 第 1 页...`);
+      const first = await this.client.fetchListPage(status, 1, signal, true);
+      const allItems = [...first.items];
+      const seenPageSignatures = new Set([firstPageFingerprint(first.items)]);
+      const { totalPages, reliable } = first.pageInfo;
+      const upperBound = reliable ? totalPages : MAX_FALLBACK_PAGES;
+
+      if (reliable) {
+        for (let page = 2; page <= totalPages; page += 1) {
+          if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+          await sleep(FETCH_INTERVAL_MS, signal);
+          this.view.setStatus(
+            `同步 [${statusName}] 第 ${page}/${totalPages} 页...`,
+          );
+          const result = await this.client.fetchListPage(
+            status,
+            page,
+            signal,
+            true,
+          );
+          if (!result.items.length) {
+            if (page < totalPages)
+              throw new Error(`第 ${page} 页为空，分页数据可能不完整`);
+            break;
+          }
+          const signature = firstPageFingerprint(result.items);
+          if (seenPageSignatures.has(signature))
+            throw new Error(`第 ${page} 页重复，已停止以保护旧缓存`);
+          seenPageSignatures.add(signature);
+          allItems.push(...result.items);
+        }
+      } else {
+        let page = 2;
+        while (page <= upperBound) {
+          if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+          await sleep(FETCH_INTERVAL_MS, signal);
+          this.view.setStatus(
+            `同步 [${statusName}] 第 ${page} 页（未发现可靠末页）...`,
+          );
+          const result = await this.client.fetchListPage(
+            status,
+            page,
+            signal,
+            true,
+          );
+          if (!result.items.length) break;
+          const signature = firstPageFingerprint(result.items);
+          if (seenPageSignatures.has(signature)) {
+            throw new Error(`第 ${page} 页重复，无法确认分页末页`);
+          }
+          seenPageSignatures.add(signature);
+          allItems.push(...result.items);
+          page += 1;
+        }
+        if (page > MAX_FALLBACK_PAGES)
+          throw new Error("分页超过安全上限，已停止同步");
+      }
+
+      const items = uniqueItems(allItems);
+      return {
+        items,
+        totalPages: reliable
+          ? totalPages
+          : Math.max(1, seenPageSignatures.size),
+        snapshot: firstPageSnapshot(first.items, this.now),
+      };
+    }
+
+    async syncStatuses(statuses, options) {
+      const { signal, manual = false, flowId = this.flowId } = options;
+      this.busy = true;
+      this.view.setProgressVisible(true);
+      this.view.updateButtons();
+
+      for (const status of statuses) {
+        if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+        if (!this.isActive(flowId))
+          throw new DOMException("Aborted", "AbortError");
+
+        const oldItems = this.storage.getItems(status);
+        const result = await this.fetchAllStatus(status, signal);
+        if (signal.aborted || !this.isActive(flowId))
+          throw new DOMException("Aborted", "AbortError");
+        const meta = {
+          version: 2,
+          totalPages: result.totalPages,
+          fingerprint: result.snapshot.fingerprint,
+          firstPage: result.snapshot.items,
+          checkedAt: this.now(),
+          updatedAt: this.now(),
+        };
+
+        this.storage.commitStatus(status, result.items, meta);
+        if (manual) {
+          const ids = [...oldItems, ...result.items].map((item) => item.id);
+          this.storage.clearSubjectMeta(ids);
+        }
+        await this.loadPool(this.targetStatuses());
+      }
+    }
+
+    async startValidation(statuses, flowId) {
+      if (!this.isActive(flowId) || this.busy) return;
+      const controller = this.createController();
+      this.view.setProgressVisible(true);
+      const changes = [];
+
+      try {
+        for (const status of statuses) {
+          if (controller.signal.aborted)
+            throw new DOMException("Aborted", "AbortError");
+          const meta = this.storage.getMeta(status);
+          if (!meta) continue;
+
+          const statusName = this.statusLabels[status] || status;
+          this.view.setStatus(`核验 [${statusName}] 最新第一页...`);
+          const remote = await this.client.fetchListPage(
+            status,
+            1,
+            controller.signal,
+            true,
+          );
+          if (controller.signal.aborted || !this.isActive(flowId)) return;
+          const snapshot = firstPageSnapshot(remote.items, this.now);
+          const sameAsAccepted = snapshot.fingerprint === meta.fingerprint;
+
+          if (sameAsAccepted) {
+            meta.checkedAt = this.now();
+            this.storage.writeJson(this.storage.metaKey(status), meta);
+          } else {
+            changes.push({
+              status,
+              snapshot,
+              totalPages: remote.pageInfo.totalPages,
+            });
+          }
+        }
+
+        if (changes.length && this.isActive(flowId)) {
+          this.pendingChanges = changes;
+          this.view.showConfirm(changes);
+          this.view.setStatus(
+            `发现 ${changes.length} 个状态有变化，请选择同步方式`,
+          );
+        } else if (this.isActive(flowId)) {
+          this.view.setStatus("✅ 最新第一页核验完成");
+        }
+      } catch (error) {
+        if (this.isActive(flowId) && error.name !== "AbortError") {
+          this.view.addLog(`后台核验失败：${error.message}`, true);
+          this.view.setStatus("后台核验失败，继续使用本地缓存", true);
+        }
+      } finally {
+        if (this.isActive(flowId)) {
+          if (this.abortController === controller) this.abortController = null;
+          this.view.setProgressVisible(false);
+          this.view.updateButtons();
+        }
+      }
+    }
+
+    keepCachedChanges() {
+      this.pendingChanges = [];
+      this.view.hideConfirm();
+      this.view.setStatus("已保留本地缓存，下次核验时会再次提示");
+    }
+
+    async refreshDetectedChanges() {
+      const changes = this.pendingChanges.splice(0);
+      this.view.hideConfirm();
+      if (!changes.length) return;
+      const flowId = ++this.flowId;
+      const controller = this.createController();
+      this.view.setResultMessage("变化状态全量更新中...");
+      try {
+        await this.syncStatuses(
+          changes.map((change) => change.status),
+          {
+            signal: controller.signal,
+            manual: false,
+            flowId,
+          },
+        );
+        if (!this.isActive(flowId)) return;
+        this.loaded = true;
+        this.view.setProgressVisible(false);
+        this.view.setResultMessage("✅ 变化状态已更新，可以继续抽卡");
+        this.view.setStatus("✅ 变化状态全量更新完成");
+      } catch (error) {
+        if (!this.isActive(flowId)) return;
+        if (error.name === "AbortError")
+          this.view.setStatus("已停止全量更新", true);
+        else {
+          this.view.addLog(`全量更新失败：${error.message}`, true);
+          this.view.setStatus("更新失败，继续使用旧缓存", true);
+          this.view.setResultMessage("更新失败，当前仍可使用旧缓存");
+        }
+      } finally {
+        if (!this.isActive(flowId)) return;
+        if (this.abortController === controller) this.abortController = null;
+        this.busy = false;
+        this.view.setProgressVisible(false);
+        this.view.updateButtons();
+      }
+    }
+
+    async forceRefresh() {
+      if (this.busy) this.stopOperations(false);
+      this.pendingChanges = [];
+      this.view.hideConfirm();
+      const statuses = this.targetStatuses();
+      const flowId = ++this.flowId;
+      const controller = this.createController();
+      this.view.clearLogs();
+      this.view.setResultMessage("准备清理当前作用域并全量刷新...");
+      this.view.setStatus("全量刷新中...");
+      try {
+        await this.syncStatuses(statuses, {
+          signal: controller.signal,
+          manual: true,
+          flowId,
+        });
+        await this.loadPool(statuses);
+        if (!this.isActive(flowId)) return;
+        this.loaded = true;
+        this.view.setResultMessage(
+          this.pool.length ? "✅ 全量刷新完成，可以抽卡" : "该收藏状态暂无条目",
+        );
+        this.view.setStatus("✅ 全量刷新完成");
+      } catch (error) {
+        if (!this.isActive(flowId)) return;
+        if (error.name === "AbortError")
+          this.view.setStatus("已停止全量刷新", true);
+        else {
+          this.view.addLog(`全量刷新失败：${error.message}`, true);
+          this.view.setStatus("刷新失败，已保留旧缓存", true);
+          this.view.setResultMessage(
+            this.pool.length
+              ? "刷新失败，当前仍可使用旧缓存"
+              : "刷新失败，请稍后重试",
+          );
+        }
+      } finally {
+        if (!this.isActive(flowId)) return;
+        if (this.abortController === controller) this.abortController = null;
+        this.busy = false;
+        this.view.setProgressVisible(false);
+        this.view.updateButtons();
+      }
+    }
 
     async draw(count) {
       if (this.busy || this.pool.length < count) return;
       this.busy = true;
       const controller = new AbortController();
       this.drawAbortController = controller;
-      this.updateButtons();
-      this.clearLogs();
-      this.setStatus(`正在准备 ${count === 10 ? "十连" : "三连"}...`);
-      let failed = 0;
-
+      this.view.updateButtons();
+      this.view.clearLogs();
+      this.view.setStatus(`正在准备 ${count === 10 ? "十连" : "三连"}...`);
       try {
-        this.ui.result.classList.add("ark-gacha-shuffling");
+        this.view.setShuffling(true);
         await sleep(600, controller.signal);
-        this.ui.result.classList.remove("ark-gacha-shuffling");
+        this.view.setShuffling(false);
 
-        const selected = this.shuffle(this.pool).slice(0, count);
-        this.ui.result.className = `ark-gacha-result-grid${count === 10 ? " ten-gacha" : ""}`;
-        this.ui.result.innerHTML =
-          '<div class="ark-gacha-message">正在获取选中条目的评分...</div>';
-
-        const cardData = await Promise.all(
-          selected.map(async (item) => {
-            try {
-              const subjectId = subjectIdFromLink(item.link) || item.id;
-              const info = await this.getSubjectInfo(
-                subjectId,
-                controller.signal,
-              );
-              if (info.source === "error" || !info.resolved || !info.hasScore)
-                failed += 1;
-              return { ...item, info, star: this.getStar(info) };
-            } catch (error) {
-              if (error.name === "AbortError") throw error;
-              failed += 1;
-              return {
-                ...item,
-                info: {
-                  hasScore: false,
-                  score: null,
-                  date: null,
-                  totalEpisodes: null,
-                  source: "error",
-                  resolved: false,
-                },
-                star: 0,
-              };
-            }
-          }),
+        this.view.showPreparingCards(count);
+        const cardData = await this.engine.cards(
+          this.pool,
+          count,
+          controller.signal,
         );
-
-        this.ui.result.replaceChildren();
-        cardData.forEach((data, index) => {
-          const card = this.createCard(data);
-          this.ui.result.appendChild(card);
-          window.setTimeout(
-            () => card.classList.add("card-enter"),
-            index * (count === 10 ? 120 : 260),
-          );
-        });
-        this.scheduleTitleHeightSync();
-        if (document.fonts?.ready) {
-          document.fonts.ready.then(() => this.scheduleTitleHeightSync());
-        }
+        const failed = cardData.filter(
+          ({ info }) =>
+            info.source === "error" || !info.resolved || !info.hasScore,
+        ).length;
+        this.view.showCards(cardData, count);
         if (failed) {
-          this.addLog(`${failed} 个条目评分获取失败，已按黑卡显示`, true);
-          this.setStatus(`抽卡完成，${failed} 个评分请求失败`, true);
+          this.view.addLog(`${failed} 个条目评分获取失败，已按黑卡显示`, true);
+          this.view.setStatus(`抽卡完成，${failed} 个评分请求失败`, true);
         } else {
-          this.setStatus("✅ 抽卡完成");
+          this.view.setStatus("✅ 抽卡完成");
         }
       } catch (error) {
         if (this.drawAbortController !== controller) return;
         if (error.name === "AbortError") {
-          this.setStatus("抽卡已停止", true);
-          this.setResultMessage("抽卡已停止");
+          this.view.setStatus("抽卡已停止", true);
+          this.view.setResultMessage("抽卡已停止");
         } else {
-          this.addLog(`抽卡失败：${error.message}`, true);
-          this.setStatus("抽卡失败，请重试", true);
+          this.view.addLog(`抽卡失败：${error.message}`, true);
+          this.view.setStatus("抽卡失败，请重试", true);
         }
       } finally {
         if (this.drawAbortController === controller) {
           this.drawAbortController = null;
           this.busy = false;
-          this.updateButtons();
+          this.view.updateButtons();
         }
       }
     }
   }
 
-  waitForDom().then(() => {
-    if (
-      !document.body ||
-      document.body.querySelector('[data-bangumi-ark-gacha="launcher"]')
-    )
-      return;
-    new GachaApp(route);
-  });
+  const ROUTE_RE =
+    /\/(anime|book|game|real|music)\/list\/([^/]+)(?:\/([^/]+))?(?:\/|$)/;
+  function start() {
+    const match = window.location.pathname.match(ROUTE_RE);
+    if (!match) return;
+    const route = {
+      subjectType: match[1],
+      userId: match[2],
+      status: STATUS_IDS.includes(match[3]) ? match[3] : "wish",
+    };
+    waitForDom().then(() => {
+      if (
+        !document.body ||
+        document.body.querySelector('[data-bangumi-ark-gacha="launcher"]')
+      )
+        return;
+      new GachaSession(route);
+    });
+  }
+  function waitForDom() {
+    if (document.body) return Promise.resolve();
+    return new Promise((resolve) => {
+      const started = Date.now();
+      const check = () => {
+        if (document.body || Date.now() - started > 10000) {
+          resolve();
+          return;
+        }
+        window.setTimeout(check, 50);
+      };
+      check();
+    });
+  }
+
+  start();
 })();
