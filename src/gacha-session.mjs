@@ -11,21 +11,24 @@ import { DrawEngine } from "./draw-engine.mjs";
 import { GachaView } from "./gacha-view.mjs";
 const FETCH_INTERVAL_MS = 350;
 const MAX_FALLBACK_PAGES = 10000;
-function sleep(ms, signal) {
+function abortError() {
+  const error = new Error("Aborted");
+  error.name = "AbortError";
+  return error;
+}
+function sleep(ms, signal, browser) {
   return new Promise((resolve, reject) => {
     let timer;
     const onAbort = () => {
-      window.clearTimeout(timer);
+      browser.clearTimeout(timer);
       if (signal) signal.removeEventListener("abort", onAbort);
-      const error = new Error("Aborted");
-      error.name = "AbortError";
-      reject(error);
+      reject(abortError());
     };
     const done = () => {
       if (signal) signal.removeEventListener("abort", onAbort);
       resolve();
     };
-    timer = window.setTimeout(done, ms);
+    timer = browser.setTimeout(done, ms);
     if (signal) {
       if (signal.aborted) onAbort();
       else signal.addEventListener("abort", onAbort, { once: true });
@@ -42,6 +45,12 @@ export class GachaSession {
       now = Date.now,
       random = Math.random,
       createView = (session) => new GachaView(session),
+      browser = {
+        origin: window.location.origin,
+        parse: (html) => new DOMParser().parseFromString(html, "text/html"),
+        setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+        clearTimeout: (id) => window.clearTimeout(id),
+      },
     } = {},
   ) {
     this.userId = appRoute.userId;
@@ -49,8 +58,9 @@ export class GachaSession {
     this.currentStatus = appRoute.status;
     this.statusLabels = statusLabelsFor(this.subjectType);
     this.storage = storage || new GachaStorage(this.userId, this.subjectType);
-    this.client = client || createBangumiClient(appRoute);
+    this.client = client || createBangumiClient({ ...appRoute, browser });
     this.now = now;
+    this.browser = browser;
     this.engine = new DrawEngine({
       storage: this.storage,
       client: this.client,
@@ -198,8 +208,8 @@ export class GachaSession {
 
     if (reliable) {
       for (let page = 2; page <= totalPages; page += 1) {
-        if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-        await sleep(FETCH_INTERVAL_MS, signal);
+        if (signal.aborted) throw abortError();
+        await sleep(FETCH_INTERVAL_MS, signal, this.browser);
         this.view.setStatus(
           `同步 [${statusName}] 第 ${page}/${totalPages} 页...`,
         );
@@ -223,8 +233,8 @@ export class GachaSession {
     } else {
       let page = 2;
       while (page <= upperBound) {
-        if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-        await sleep(FETCH_INTERVAL_MS, signal);
+        if (signal.aborted) throw abortError();
+        await sleep(FETCH_INTERVAL_MS, signal, this.browser);
         this.view.setStatus(
           `同步 [${statusName}] 第 ${page} 页（未发现可靠末页）...`,
         );
@@ -262,14 +272,12 @@ export class GachaSession {
     this.view.updateButtons();
 
     for (const status of statuses) {
-      if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-      if (!this.isActive(flowId))
-        throw new DOMException("Aborted", "AbortError");
+      if (signal.aborted) throw abortError();
+      if (!this.isActive(flowId)) throw abortError();
 
       const oldItems = this.storage.getItems(status);
       const result = await this.fetchAllStatus(status, signal);
-      if (signal.aborted || !this.isActive(flowId))
-        throw new DOMException("Aborted", "AbortError");
+      if (signal.aborted || !this.isActive(flowId)) throw abortError();
       const meta = {
         version: 2,
         totalPages: result.totalPages,
@@ -296,8 +304,7 @@ export class GachaSession {
 
     try {
       for (const status of statuses) {
-        if (controller.signal.aborted)
-          throw new DOMException("Aborted", "AbortError");
+        if (controller.signal.aborted) throw abortError();
         const meta = this.storage.getMeta(status);
         if (!meta) continue;
 
@@ -448,7 +455,7 @@ export class GachaSession {
     this.view.setStatus(`正在准备 ${count === 10 ? "十连" : "三连"}...`);
     try {
       this.view.setShuffling(true);
-      await sleep(600, controller.signal);
+      await sleep(600, controller.signal, this.browser);
       this.view.setShuffling(false);
 
       this.view.showPreparingCards(count);

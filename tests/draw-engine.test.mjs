@@ -12,10 +12,15 @@ test("score cache is reused until the original seven-day boundary", async () => 
   const client = {
     fetchSubject: async () => {
       calls++;
-      return new DOMParser().parseFromString(
-        '<div class="global_score"><span class="number">7.5</span></div><ul id="infobox"><li>放送开始: 2019-01-01</li><li>话数: 12</li></ul>',
-        "text/html",
-      );
+      return {
+        score: 7.5,
+        hasScore: true,
+        date: "2019-01-01",
+        isPartial: false,
+        totalEpisodes: 12,
+        resolved: true,
+        source: "subject",
+      };
     },
   };
   const engine = new DrawEngine({

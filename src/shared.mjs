@@ -19,10 +19,10 @@ export function statusLabelsFor(subjectType) {
   };
 }
 
-function normalizeCover(src) {
+function normalizeCover(src, origin = window.location.origin) {
   if (!src) return "";
   try {
-    const url = new URL(src, window.location.origin);
+    const url = new URL(src, origin);
     url.pathname = url.pathname.replace(/\/r\/\d+\/pic/, "/pic");
     return url.href;
   } catch (error) {
@@ -35,20 +35,20 @@ export function subjectIdFromLink(link) {
   return match ? match[1] : "";
 }
 
-export function normalizeItem(item) {
+export function normalizeItem(item, origin) {
   if (!item || !item.id) return null;
   return {
     id: String(item.id),
     title: String(item.title || "").trim(),
     link: String(item.link || ""),
-    cover: normalizeCover(item.cover || ""),
+    cover: normalizeCover(item.cover || "", origin),
   };
 }
 
-export function uniqueItems(items) {
+export function uniqueItems(items, origin) {
   const seen = new Set();
   return (Array.isArray(items) ? items : [])
-    .map(normalizeItem)
+    .map((item) => normalizeItem(item, origin))
     .filter((item) => {
       if (!item || seen.has(item.id)) return false;
       seen.add(item.id);

@@ -39,10 +39,10 @@
     };
   }
 
-  function normalizeCover(src) {
+  function normalizeCover(src, origin = window.location.origin) {
     if (!src) return "";
     try {
-      const url = new URL(src, window.location.origin);
+      const url = new URL(src, origin);
       url.pathname = url.pathname.replace(/\/r\/\d+\/pic/, "/pic");
       return url.href;
     } catch (error) {
@@ -55,20 +55,20 @@
     return match ? match[1] : "";
   }
 
-  function normalizeItem(item) {
+  function normalizeItem(item, origin) {
     if (!item || !item.id) return null;
     return {
       id: String(item.id),
       title: String(item.title || "").trim(),
       link: String(item.link || ""),
-      cover: normalizeCover(item.cover || ""),
+      cover: normalizeCover(item.cover || "", origin),
     };
   }
 
-  function uniqueItems(items) {
+  function uniqueItems(items, origin) {
     const seen = new Set();
     return (Array.isArray(items) ? items : [])
-      .map(normalizeItem)
+      .map((item) => normalizeItem(item, origin))
       .filter((item) => {
         if (!item || seen.has(item.id)) return false;
         seen.add(item.id);
@@ -182,150 +182,7 @@
     }
   }
 
-  const PAGE_TIMEOUT_MS = 10000;
-  const SCORE_TIMEOUT_MS = 5000;
-  function pageNumberFromHref(href) {
-    try {
-      const url = new URL(href, window.location.origin);
-      const page = Number(url.searchParams.get("page"));
-      return Number.isFinite(page) && page > 0 ? page : null;
-    } catch (error) {
-      return null;
-    }
-  }
-
-  function pageInfo(doc) {
-    const edge = doc.querySelector(".p_edge");
-    const edgeText = edge ? edge.textContent || "" : "";
-    const edgeMatch = edgeText.match(/(\d+)\s*\/\s*(\d+)/);
-    if (edgeMatch) {
-      return { totalPages: Math.max(1, Number(edgeMatch[2])), reliable: true };
-    }
-
-    const pageNumbers = Array.from(
-      doc.querySelectorAll("#multipage a, #multipage .p"),
-    )
-      .map(
-        (node) =>
-          pageNumberFromHref(node.getAttribute("href") || "") ||
-          Number(node.textContent),
-      )
-      .filter((page) => Number.isFinite(page) && page > 0);
-
-    return {
-      totalPages: pageNumbers.length ? Math.max(...pageNumbers) : 1,
-      reliable: false,
-    };
-  }
-
-  function parseListPage(doc) {
-    return Array.from(doc.querySelectorAll("#browserItemList li.item"))
-      .map((li) => {
-        const linkElement = li.querySelector("h3 a");
-        if (!linkElement) return null;
-        const link = linkElement.href || linkElement.getAttribute("href") || "";
-        const id = subjectIdFromLink(link);
-        if (!id) return null;
-        return normalizeItem({
-          id,
-          title: linkElement.textContent || linkElement.innerText || "",
-          link,
-          cover: li.querySelector("img.cover")?.getAttribute("src") || "",
-        });
-      })
-      .filter(Boolean);
-  }
-
-  async function fetchText(url, options = {}, transport = fetch) {
-    const { signal, timeoutMs = PAGE_TIMEOUT_MS, cache = "default" } = options;
-    const controller = new AbortController();
-    let timedOut = false;
-    let abortListener = null;
-    const timer = window.setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, timeoutMs);
-
-    if (signal) {
-      abortListener = () => controller.abort();
-      if (signal.aborted) controller.abort();
-      else signal.addEventListener("abort", abortListener, { once: true });
-    }
-
-    try {
-      const response = await transport(url, {
-        credentials: "same-origin",
-        cache,
-        signal: controller.signal,
-      });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      return await response.text();
-    } catch (error) {
-      if (timedOut) throw new Error(`请求超时：${url}`);
-      throw error;
-    } finally {
-      window.clearTimeout(timer);
-      if (signal && abortListener)
-        signal.removeEventListener("abort", abortListener);
-    }
-  }
-
-  function createBangumiClient({
-    subjectType,
-    userId,
-    transport = fetch,
-    parse = (html) => new DOMParser().parseFromString(html, "text/html"),
-  }) {
-    return {
-      async fetchListPage(status, page, signal, noStore = false) {
-        const path = `/${subjectType}/list/${encodeURIComponent(userId)}/${status}`;
-        const url = page === 1 ? path : `${path}?page=${page}`;
-        const html = await fetchText(
-          url,
-          { signal, cache: noStore ? "no-store" : "default" },
-          transport,
-        );
-        const doc = parse(html);
-        return {
-          items: uniqueItems(parseListPage(doc)),
-          pageInfo: pageInfo(doc),
-        };
-      },
-      async fetchSubject(subjectId, signal) {
-        return parse(
-          await fetchText(
-            `/subject/${subjectId}`,
-            { signal, timeoutMs: SCORE_TIMEOUT_MS },
-            transport,
-          ),
-        );
-      },
-    };
-  }
-
-  const SCORE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-  const SUBJECT_CACHE_VERSION = 3;
-  class DrawEngine {
-    constructor({
-      storage,
-      client,
-      subjectType,
-      now = Date.now,
-      random = Math.random,
-    }) {
-      Object.assign(this, { storage, client, subjectType, now, random });
-    }
-    getCachedSubject(subjectId) {
-      const cached = this.storage.getSubjectMeta(subjectId);
-      if (
-        !cached ||
-        cached.version !== SUBJECT_CACHE_VERSION ||
-        !cached.fetchedAt
-      )
-        return null;
-      return this.now() - cached.fetchedAt <= SCORE_TTL_MS ? cached : null;
-    }
-
+  class SubjectParser {
     extractScore(doc) {
       const selectors = [
         "#ChartWarpper .global_score .number",
@@ -450,14 +307,173 @@
         source: "subject",
       };
     }
+  }
+
+  const PAGE_TIMEOUT_MS = 10000;
+  const SCORE_TIMEOUT_MS = 5000;
+  function pageNumberFromHref(href, origin = window.location.origin) {
+    try {
+      const url = new URL(href, origin);
+      const page = Number(url.searchParams.get("page"));
+      return Number.isFinite(page) && page > 0 ? page : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function pageInfo(doc, origin) {
+    const edge = doc.querySelector(".p_edge");
+    const edgeText = edge ? edge.textContent || "" : "";
+    const edgeMatch = edgeText.match(/(\d+)\s*\/\s*(\d+)/);
+    if (edgeMatch) {
+      return { totalPages: Math.max(1, Number(edgeMatch[2])), reliable: true };
+    }
+
+    const pageNumbers = Array.from(
+      doc.querySelectorAll("#multipage a, #multipage .p"),
+    )
+      .map(
+        (node) =>
+          pageNumberFromHref(node.getAttribute("href") || "", origin) ||
+          Number(node.textContent),
+      )
+      .filter((page) => Number.isFinite(page) && page > 0);
+
+    return {
+      totalPages: pageNumbers.length ? Math.max(...pageNumbers) : 1,
+      reliable: false,
+    };
+  }
+
+  function parseListPage(doc, origin) {
+    return Array.from(doc.querySelectorAll("#browserItemList li.item"))
+      .map((li) => {
+        const linkElement = li.querySelector("h3 a");
+        if (!linkElement) return null;
+        const link = linkElement.href || linkElement.getAttribute("href") || "";
+        const id = subjectIdFromLink(link);
+        if (!id) return null;
+        return normalizeItem(
+          {
+            id,
+            title: linkElement.textContent || linkElement.innerText || "",
+            link,
+            cover: li.querySelector("img.cover")?.getAttribute("src") || "",
+          },
+          origin,
+        );
+      })
+      .filter(Boolean);
+  }
+
+  async function fetchText(url, options = {}, transport = fetch, browser) {
+    const { signal, timeoutMs = PAGE_TIMEOUT_MS, cache = "default" } = options;
+    const controller = new AbortController();
+    let timedOut = false;
+    let abortListener = null;
+    const timer = browser.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+
+    if (signal) {
+      abortListener = () => controller.abort();
+      if (signal.aborted) controller.abort();
+      else signal.addEventListener("abort", abortListener, { once: true });
+    }
+
+    try {
+      const response = await transport(url, {
+        credentials: "same-origin",
+        cache,
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return await response.text();
+    } catch (error) {
+      if (timedOut) throw new Error(`请求超时：${url}`);
+      throw error;
+    } finally {
+      browser.clearTimeout(timer);
+      if (signal && abortListener)
+        signal.removeEventListener("abort", abortListener);
+    }
+  }
+
+  function createBangumiClient({
+    subjectType,
+    userId,
+    transport = fetch,
+    browser = {
+      origin: window.location.origin,
+      parse: (html) => new DOMParser().parseFromString(html, "text/html"),
+      setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+      clearTimeout: (id) => window.clearTimeout(id),
+    },
+  }) {
+    return {
+      async fetchListPage(status, page, signal, noStore = false) {
+        const path = `/${subjectType}/list/${encodeURIComponent(userId)}/${status}`;
+        const url = page === 1 ? path : `${path}?page=${page}`;
+        const html = await fetchText(
+          url,
+          { signal, cache: noStore ? "no-store" : "default" },
+          transport,
+          browser,
+        );
+        const doc = browser.parse(html);
+        return {
+          items: uniqueItems(
+            parseListPage(doc, browser.origin),
+            browser.origin,
+          ),
+          pageInfo: pageInfo(doc, browser.origin),
+        };
+      },
+      async fetchSubject(subjectId, signal) {
+        return new SubjectParser().subjectInfoFromDocument(
+          browser.parse(
+            await fetchText(
+              `/subject/${subjectId}`,
+              { signal, timeoutMs: SCORE_TIMEOUT_MS },
+              transport,
+              browser,
+            ),
+          ),
+        );
+      },
+    };
+  }
+
+  const SCORE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+  const SUBJECT_CACHE_VERSION = 3;
+  class DrawEngine {
+    constructor({
+      storage,
+      client,
+      subjectType,
+      now = Date.now,
+      random = Math.random,
+    }) {
+      Object.assign(this, { storage, client, subjectType, now, random });
+    }
+    getCachedSubject(subjectId) {
+      const cached = this.storage.getSubjectMeta(subjectId);
+      if (
+        !cached ||
+        cached.version !== SUBJECT_CACHE_VERSION ||
+        !cached.fetchedAt
+      )
+        return null;
+      return this.now() - cached.fetchedAt <= SCORE_TTL_MS ? cached : null;
+    }
 
     async getSubjectInfo(subjectId, signal) {
       const cached = this.getCachedSubject(subjectId);
       if (cached) return cached;
 
       try {
-        const html = await this.client.fetchSubject(subjectId, signal);
-        const subjectResult = this.subjectInfoFromDocument(html);
+        const subjectResult = await this.client.fetchSubject(subjectId, signal);
         const stored = {
           version: SUBJECT_CACHE_VERSION,
           subjectId,
@@ -1038,21 +1054,24 @@
 
   const FETCH_INTERVAL_MS = 350;
   const MAX_FALLBACK_PAGES = 10000;
-  function sleep(ms, signal) {
+  function abortError() {
+    const error = new Error("Aborted");
+    error.name = "AbortError";
+    return error;
+  }
+  function sleep(ms, signal, browser) {
     return new Promise((resolve, reject) => {
       let timer;
       const onAbort = () => {
-        window.clearTimeout(timer);
+        browser.clearTimeout(timer);
         if (signal) signal.removeEventListener("abort", onAbort);
-        const error = new Error("Aborted");
-        error.name = "AbortError";
-        reject(error);
+        reject(abortError());
       };
       const done = () => {
         if (signal) signal.removeEventListener("abort", onAbort);
         resolve();
       };
-      timer = window.setTimeout(done, ms);
+      timer = browser.setTimeout(done, ms);
       if (signal) {
         if (signal.aborted) onAbort();
         else signal.addEventListener("abort", onAbort, { once: true });
@@ -1069,6 +1088,12 @@
         now = Date.now,
         random = Math.random,
         createView = (session) => new GachaView(session),
+        browser = {
+          origin: window.location.origin,
+          parse: (html) => new DOMParser().parseFromString(html, "text/html"),
+          setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+          clearTimeout: (id) => window.clearTimeout(id),
+        },
       } = {},
     ) {
       this.userId = appRoute.userId;
@@ -1076,8 +1101,9 @@
       this.currentStatus = appRoute.status;
       this.statusLabels = statusLabelsFor(this.subjectType);
       this.storage = storage || new GachaStorage(this.userId, this.subjectType);
-      this.client = client || createBangumiClient(appRoute);
+      this.client = client || createBangumiClient({ ...appRoute, browser });
       this.now = now;
+      this.browser = browser;
       this.engine = new DrawEngine({
         storage: this.storage,
         client: this.client,
@@ -1226,8 +1252,8 @@
 
       if (reliable) {
         for (let page = 2; page <= totalPages; page += 1) {
-          if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-          await sleep(FETCH_INTERVAL_MS, signal);
+          if (signal.aborted) throw abortError();
+          await sleep(FETCH_INTERVAL_MS, signal, this.browser);
           this.view.setStatus(
             `同步 [${statusName}] 第 ${page}/${totalPages} 页...`,
           );
@@ -1251,8 +1277,8 @@
       } else {
         let page = 2;
         while (page <= upperBound) {
-          if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-          await sleep(FETCH_INTERVAL_MS, signal);
+          if (signal.aborted) throw abortError();
+          await sleep(FETCH_INTERVAL_MS, signal, this.browser);
           this.view.setStatus(
             `同步 [${statusName}] 第 ${page} 页（未发现可靠末页）...`,
           );
@@ -1292,14 +1318,12 @@
       this.view.updateButtons();
 
       for (const status of statuses) {
-        if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-        if (!this.isActive(flowId))
-          throw new DOMException("Aborted", "AbortError");
+        if (signal.aborted) throw abortError();
+        if (!this.isActive(flowId)) throw abortError();
 
         const oldItems = this.storage.getItems(status);
         const result = await this.fetchAllStatus(status, signal);
-        if (signal.aborted || !this.isActive(flowId))
-          throw new DOMException("Aborted", "AbortError");
+        if (signal.aborted || !this.isActive(flowId)) throw abortError();
         const meta = {
           version: 2,
           totalPages: result.totalPages,
@@ -1326,8 +1350,7 @@
 
       try {
         for (const status of statuses) {
-          if (controller.signal.aborted)
-            throw new DOMException("Aborted", "AbortError");
+          if (controller.signal.aborted) throw abortError();
           const meta = this.storage.getMeta(status);
           if (!meta) continue;
 
@@ -1478,7 +1501,7 @@
       this.view.setStatus(`正在准备 ${count === 10 ? "十连" : "三连"}...`);
       try {
         this.view.setShuffling(true);
-        await sleep(600, controller.signal);
+        await sleep(600, controller.signal, this.browser);
         this.view.setShuffling(false);
 
         this.view.showPreparingCards(count);
@@ -1533,7 +1556,17 @@
         document.body.querySelector('[data-bangumi-ark-gacha="launcher"]')
       )
         return;
-      new GachaSession(route);
+      const browser = {
+        origin: window.location.origin,
+        parse: (html) => new DOMParser().parseFromString(html, "text/html"),
+        setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+        clearTimeout: (id) => window.clearTimeout(id),
+      };
+      new GachaSession(route, {
+        storage: new GachaStorage(route.userId, route.subjectType),
+        client: createBangumiClient({ ...route, browser }),
+        browser,
+      });
     });
   }
   function waitForDom() {

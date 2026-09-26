@@ -2,6 +2,58 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { setup, flush, empty } from "./support/session.mjs";
 
+test("draw wait is driven by an injected browser timer", async () => {
+  const { dom, session } = setup({
+    browser: {
+      setTimeout(callback, ms) {
+        assert.equal(ms, 600);
+        this.fire = callback;
+        return 1;
+      },
+      clearTimeout() {},
+    },
+  });
+  session.pool = [1, 2, 3].map((id) => ({
+    id: String(id),
+    title: `条目${id}`,
+    link: `/subject/${id}`,
+  }));
+  const drawing = session.draw(3);
+  assert.equal(document.querySelectorAll(".ark-gacha-card").length, 0);
+  session.browser.fire();
+  await drawing;
+  assert.equal(document.querySelectorAll(".ark-gacha-card").length, 3);
+  dom.window.close();
+});
+
+test("pagination wait uses the injected browser timer", async () => {
+  const timer = {
+    setTimeout(callback, ms) {
+      assert.equal(ms, 350);
+      this.fire = callback;
+      return 1;
+    },
+    clearTimeout() {},
+  };
+  const { dom, requests, click } = setup({ browser: timer });
+  click(".ark-gacha-launcher");
+  await flush();
+  requests[0].resolve({
+    items: [{ id: "1", title: "首部", link: "/subject/1" }],
+    pageInfo: { reliable: true, totalPages: 2 },
+  });
+  await flush();
+  assert.equal(requests.length, 1);
+  timer.fire();
+  await flush();
+  assert.equal(requests[1].page, 2);
+  requests[1].resolve(empty);
+  await flush();
+  requests[2].resolve(empty);
+  await flush();
+  dom.window.close();
+});
+
 test("first load continues behind closed modal; reopening does not restart completed sync", async () => {
   const { dom, session, requests, click } = setup();
   click(".ark-gacha-launcher");
@@ -67,6 +119,31 @@ test("switching status cancels old sync and gives the new status progress", asyn
   assert.equal(session.storage.getMeta("wish"), null);
   assert.ok(session.storage.getMeta("do"));
   requests[2].resolve(empty);
+  await flush();
+  dom.window.close();
+});
+
+test("reopening during cached first-page validation retains its progress without another request", async () => {
+  const { dom, requests, click } = setup();
+  click(".ark-gacha-launcher");
+  await flush();
+  requests[0].resolve(empty);
+  await flush();
+  assert.equal(requests.length, 2);
+  click(".ark-gacha-mask");
+  click(".ark-gacha-launcher");
+  await flush();
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].signal.aborted, false);
+  assert.equal(
+    document.querySelector("#ark-gacha-progress-wrap").hidden,
+    false,
+  );
+  assert.match(
+    document.querySelector("#ark-gacha-progress").textContent,
+    /核验 \[想看\]/,
+  );
+  requests[1].resolve(empty);
   await flush();
   dom.window.close();
 });

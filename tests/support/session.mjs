@@ -19,7 +19,7 @@ export function environment() {
   dom.window.cancelAnimationFrame = () => {};
   return dom;
 }
-export function setup({ ignoreAbort = false } = {}) {
+export function setup({ ignoreAbort = false, browser } = {}) {
   const dom = environment();
   const requests = [];
   const client = {
@@ -34,15 +34,19 @@ export function setup({ ignoreAbort = false } = {}) {
           );
       });
     },
-    fetchSubject: async () =>
-      new DOMParser().parseFromString(
-        '<div class="global_score"><span class="number">8.3</span></div><ul id="infobox"><li>放送开始: 2020-01-01</li><li>话数: 12</li></ul>',
-        "text/html",
-      ),
+    fetchSubject: async () => ({
+      score: 8.3,
+      hasScore: true,
+      date: "2020-01-01",
+      isPartial: false,
+      totalEpisodes: 12,
+      resolved: true,
+      source: "subject",
+    }),
   };
   const session = new GachaSession(
     { userId: "test", subjectType: "anime", status: "wish" },
-    { client },
+    { client, browser },
   );
   const click = (selector) => document.querySelector(selector).click();
   return { dom, session, requests, click };
