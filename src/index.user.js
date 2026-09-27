@@ -50,6 +50,17 @@
     }
   }
 
+  function validCalendarDate(date) {
+    if (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date))
+      return false;
+    const parsed = new Date(`${date}T00:00:00`);
+    return (
+      !Number.isNaN(parsed.getTime()) &&
+      `${String(parsed.getFullYear()).padStart(4, "0")}-${String(parsed.getMonth() + 1).padStart(2, "0")}-${String(parsed.getDate()).padStart(2, "0")}` ===
+        date
+    );
+  }
+
   function subjectIdFromLink(link) {
     const match = String(link || "").match(/\/subject\/(\d+)/);
     return match ? match[1] : "";
@@ -202,6 +213,15 @@
     }
   }
 
+  function createBrowserAdapter() {
+    return {
+      origin: window.location.origin,
+      parse: (html) => new DOMParser().parseFromString(html, "text/html"),
+      setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+      clearTimeout: (id) => window.clearTimeout(id),
+    };
+  }
+
   class SubjectParser {
     extractScore(doc) {
       const selectors = [
@@ -266,6 +286,13 @@
       return match ? Number(match[0]) : null;
     }
 
+    validatedDate(year, month, day, isPartial = false) {
+      const date = `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+      return !validCalendarDate(date)
+        ? { date: null, isPartial: false }
+        : { date, isPartial };
+    }
+
     normalizeDate(dateValue) {
       if (!dateValue) return { date: null, isPartial: false };
       const dateString = String(dateValue).trim().replace(/T.*$/, "");
@@ -277,36 +304,17 @@
         };
 
       const full = dateString.match(/^(\d{4})[-/]([01]?\d)[-/]([0-3]?\d)/);
-      if (full) {
-        const date = `${full[1]}-${full[2].padStart(2, "0")}-${full[3].padStart(2, "0")}`;
-        const parsed = new Date(`${date}T00:00:00`);
-        return Number.isNaN(parsed.getTime())
-          ? { date: null, isPartial: false }
-          : { date, isPartial: false };
-      }
+      if (full) return this.validatedDate(full[1], full[2], full[3]);
 
       const month = dateString.match(/^(\d{4})[-/]([01]?\d)$/);
-      if (month)
-        return {
-          date: `${month[1]}-${month[2].padStart(2, "0")}-01`,
-          isPartial: true,
-        };
+      if (month) return this.validatedDate(month[1], month[2], "01", true);
       const cnFull = dateString.match(
         /^(\d{4})年\s*([01]?\d)月\s*([0-3]?\d)日$/,
       );
-      if (cnFull) {
-        const date = `${cnFull[1]}-${cnFull[2].padStart(2, "0")}-${cnFull[3].padStart(2, "0")}`;
-        const parsed = new Date(`${date}T00:00:00`);
-        return Number.isNaN(parsed.getTime())
-          ? { date: null, isPartial: false }
-          : { date, isPartial: false };
-      }
+      if (cnFull) return this.validatedDate(cnFull[1], cnFull[2], cnFull[3]);
       const cnMonth = dateString.match(/^(\d{4})年\s*([01]?\d)月$/);
       if (cnMonth)
-        return {
-          date: `${cnMonth[1]}-${cnMonth[2].padStart(2, "0")}-01`,
-          isPartial: true,
-        };
+        return this.validatedDate(cnMonth[1], cnMonth[2], "01", true);
       const year = dateString.match(/^(\d{4})(?:年)?$/);
       if (year) return { date: `${year[1]}-01-01`, isPartial: true };
       return { date: null, isPartial: false };
@@ -372,7 +380,9 @@
   function parseListPage(doc, origin) {
     if (!doc.querySelector("#browserItemList")) {
       if (doc.querySelector('form[action*="login"], a[href*="/login"]'))
-        throw new Error("请先登录 Bangumi");
+        throw Object.assign(new Error("请先登录 Bangumi"), {
+          code: "LOGIN_REQUIRED",
+        });
       throw new Error("收藏列表结构无效");
     }
     const entries = Array.from(
@@ -429,7 +439,10 @@
         cache,
         signal: controller.signal,
       });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      if (!response.ok)
+        throw Object.assign(new Error(`HTTP ${response.status}`), {
+          status: response.status,
+        });
       return await response.text();
     } catch (error) {
       if (timedOut) throw new Error(`请求超时：${url}`);
@@ -445,12 +458,7 @@
     subjectType,
     userId,
     transport = fetch,
-    browser = {
-      origin: window.location.origin,
-      parse: (html) => new DOMParser().parseFromString(html, "text/html"),
-      setTimeout: (fn, ms) => window.setTimeout(fn, ms),
-      clearTimeout: (id) => window.clearTimeout(id),
-    },
+    browser = createBrowserAdapter(),
   }) {
     return {
       async fetchListPage(status, page, signal, noStore = false) {
@@ -496,6 +504,7 @@
       this.running = new Set();
       this.foreground = new Set();
       this.order = new Map();
+      this.nextOrder = 0;
     }
 
     setForeground(statuses) {
@@ -506,7 +515,7 @@
     request(status, page, signal) {
       if (signal.aborted)
         return Promise.reject(new DOMException("Aborted", "AbortError"));
-      if (!this.order.has(status)) this.order.set(status, this.order.size);
+      if (!this.order.has(signal)) this.order.set(signal, this.nextOrder++);
       return new Promise((resolve, reject) => {
         const job = {
           status,
@@ -520,12 +529,21 @@
           this.queue = this.queue.filter((entry) => entry !== job);
           job.controller.abort();
           reject(new DOMException("Aborted", "AbortError"));
+          this.releaseOrder(signal);
           this.drain();
         };
         signal.addEventListener("abort", job.abort, { once: true });
         this.queue.push(job);
         this.drain();
       });
+    }
+
+    releaseOrder(signal) {
+      if (
+        !this.queue.some((job) => job.signal === signal) &&
+        ![...this.running].some((job) => job.signal === signal)
+      )
+        this.order.delete(signal);
     }
 
     drain() {
@@ -538,7 +556,7 @@
         );
         if (!candidates.length) return;
         candidates.sort(
-          (a, b) => this.order.get(a.status) - this.order.get(b.status),
+          (a, b) => this.order.get(a.signal) - this.order.get(b.signal),
         );
         const job = candidates[0];
         this.queue.splice(this.queue.indexOf(job), 1);
@@ -559,6 +577,7 @@
           .finally(() => {
             job.signal.removeEventListener("abort", job.abort);
             this.running.delete(job);
+            this.releaseOrder(job.signal);
             this.drain();
           });
       }
@@ -567,6 +586,24 @@
 
   const SCORE_TTL_MS = 72 * 60 * 60 * 1000;
   const SUBJECT_CACHE_VERSION = 3;
+  function validSubjectInfo(info) {
+    if (
+      typeof info.hasScore !== "boolean" ||
+      (info.hasScore
+        ? typeof info.score !== "number" ||
+          !Number.isFinite(info.score) ||
+          info.score <= 0 ||
+          info.score > 10
+        : info.score !== null) ||
+      typeof info.isPartial !== "boolean" ||
+      (info.totalEpisodes !== null &&
+        (!Number.isSafeInteger(info.totalEpisodes) ||
+          info.totalEpisodes < 0)) ||
+      (info.date !== null && !validCalendarDate(info.date))
+    )
+      return false;
+    return true;
+  }
   class DrawEngine {
     constructor({
       storage,
@@ -583,6 +620,8 @@
         !cached ||
         cached.version !== SUBJECT_CACHE_VERSION ||
         cached.resolved !== true ||
+        cached.subjectId !== String(subjectId) ||
+        !validSubjectInfo(cached) ||
         !Number.isFinite(cached.fetchedAt) ||
         cached.fetchedAt < 0
       )
@@ -1228,12 +1267,7 @@
         now = Date.now,
         random = Math.random,
         createView = (session) => new GachaView(session),
-        browser = {
-          origin: window.location.origin,
-          parse: (html) => new DOMParser().parseFromString(html, "text/html"),
-          setTimeout: (fn, ms) => window.setTimeout(fn, ms),
-          clearTimeout: (id) => window.clearTimeout(id),
-        },
+        browser = createBrowserAdapter(),
       } = {},
     ) {
       this.userId = appRoute.userId;
@@ -1340,7 +1374,13 @@
           if (refresh && existing.mode === "check") {
             existing.controller.abort();
             this.tasks.delete(status);
-            this.startTask(status, "update", !intent, intent);
+            this.startTask(
+              status,
+              "update",
+              existing.independent,
+              intent,
+              existing.intents,
+            );
           }
         } else {
           this.startTask(
@@ -1353,12 +1393,14 @@
       }
       this.focus();
     }
-    startTask(status, mode, independent, intent) {
+    startTask(status, mode, independent, intent, previousIntents = []) {
       const task = {
         status,
         mode,
         independent,
-        intents: new Set(intent ? [intent] : []),
+        intents: new Set(
+          intent ? [...previousIntents, intent] : previousIntents,
+        ),
         controller: new AbortController(),
         progress: "",
         promise: null,
@@ -1418,7 +1460,7 @@
       }
     }
     fail(task, error) {
-      const limited = /HTTP 429\b/.test(error.message);
+      const limited = error.status === 429;
       const affected = [...task.intents].filter((intent) => !intent.failed);
       for (const intent of affected) intent.failed = true;
       const currentAffected =
@@ -1433,7 +1475,7 @@
         `[${this.statusLabels[task.status]}] 获取失败：${error.message}`,
         true,
       );
-      if (error.message === "请先登录 Bangumi")
+      if (error.code === "LOGIN_REQUIRED")
         this.view.setLoginNotice(error.message);
       for (const other of this.tasks.values()) {
         if (other === task) continue;
@@ -1601,12 +1643,7 @@
         document.body.querySelector('[data-bangumi-ark-gacha="launcher"]')
       )
         return;
-      const browser = {
-        origin: window.location.origin,
-        parse: (html) => new DOMParser().parseFromString(html, "text/html"),
-        setTimeout: (fn, ms) => window.setTimeout(fn, ms),
-        clearTimeout: (id) => window.clearTimeout(id),
-      };
+      const browser = createBrowserAdapter();
       new GachaSession(route, {
         storage: new GachaStorage(route.userId, route.subjectType),
         client: createBangumiClient({ ...route, browser }),

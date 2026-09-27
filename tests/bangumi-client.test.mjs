@@ -26,6 +26,24 @@ test("subject request returns parsed score and release data, not a DOM document"
   dom.window.close();
 });
 
+test("invalid partial release dates are not cached as valid dates", async () => {
+  const dom = browser();
+  for (const rawDate of ["2025-13", "2025年13月"]) {
+    const client = createBangumiClient({
+      subjectType: "anime",
+      userId: "test",
+      transport: async () => ({
+        ok: true,
+        text: async () => `<ul id="infobox"><li>放送开始: ${rawDate}</li></ul>`,
+      }),
+    });
+    const info = await client.fetchSubject("42");
+    assert.equal(info.date, null);
+    assert.equal(info.isPartial, false);
+  }
+  dom.window.close();
+});
+
 test("client accepts an injected browser parser, origin and timeout clock", async () => {
   const dom = browser();
   const timers = new Map();
@@ -112,7 +130,10 @@ test("login and malformed list pages cannot be treated as empty collections", as
       userId: "test",
       transport: async () => ({ ok: true, text: async () => html }),
     });
-    await assert.rejects(client.fetchListPage("wish", 1));
+    await assert.rejects(
+      client.fetchListPage("wish", 1),
+      html.includes("/login") ? { code: "LOGIN_REQUIRED" } : /无效/,
+    );
   }
   dom.window.close();
 });
@@ -124,6 +145,9 @@ test("HTTP errors are rejected rather than reported as an empty page", async () 
     userId: "test",
     transport: async () => ({ ok: false, status: 403 }),
   });
-  await assert.rejects(client.fetchListPage("wish", 1), /HTTP 403/);
+  await assert.rejects(client.fetchListPage("wish", 1), {
+    message: "HTTP 403",
+    status: 403,
+  });
   dom.window.close();
 });

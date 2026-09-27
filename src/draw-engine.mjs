@@ -1,7 +1,24 @@
-import { subjectIdFromLink } from "./shared.mjs";
+import { subjectIdFromLink, validCalendarDate } from "./shared.mjs";
 
 const SCORE_TTL_MS = 72 * 60 * 60 * 1000;
 const SUBJECT_CACHE_VERSION = 3;
+function validSubjectInfo(info) {
+  if (
+    typeof info.hasScore !== "boolean" ||
+    (info.hasScore
+      ? typeof info.score !== "number" ||
+        !Number.isFinite(info.score) ||
+        info.score <= 0 ||
+        info.score > 10
+      : info.score !== null) ||
+    typeof info.isPartial !== "boolean" ||
+    (info.totalEpisodes !== null &&
+      (!Number.isSafeInteger(info.totalEpisodes) || info.totalEpisodes < 0)) ||
+    (info.date !== null && !validCalendarDate(info.date))
+  )
+    return false;
+  return true;
+}
 export class DrawEngine {
   constructor({
     storage,
@@ -18,6 +35,8 @@ export class DrawEngine {
       !cached ||
       cached.version !== SUBJECT_CACHE_VERSION ||
       cached.resolved !== true ||
+      cached.subjectId !== String(subjectId) ||
+      !validSubjectInfo(cached) ||
       !Number.isFinite(cached.fetchedAt) ||
       cached.fetchedAt < 0
     )

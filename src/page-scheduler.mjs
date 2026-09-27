@@ -8,6 +8,7 @@ export class PageScheduler {
     this.running = new Set();
     this.foreground = new Set();
     this.order = new Map();
+    this.nextOrder = 0;
   }
 
   setForeground(statuses) {
@@ -18,7 +19,7 @@ export class PageScheduler {
   request(status, page, signal) {
     if (signal.aborted)
       return Promise.reject(new DOMException("Aborted", "AbortError"));
-    if (!this.order.has(status)) this.order.set(status, this.order.size);
+    if (!this.order.has(signal)) this.order.set(signal, this.nextOrder++);
     return new Promise((resolve, reject) => {
       const job = {
         status,
@@ -32,12 +33,21 @@ export class PageScheduler {
         this.queue = this.queue.filter((entry) => entry !== job);
         job.controller.abort();
         reject(new DOMException("Aborted", "AbortError"));
+        this.releaseOrder(signal);
         this.drain();
       };
       signal.addEventListener("abort", job.abort, { once: true });
       this.queue.push(job);
       this.drain();
     });
+  }
+
+  releaseOrder(signal) {
+    if (
+      !this.queue.some((job) => job.signal === signal) &&
+      ![...this.running].some((job) => job.signal === signal)
+    )
+      this.order.delete(signal);
   }
 
   drain() {
@@ -50,7 +60,7 @@ export class PageScheduler {
       );
       if (!candidates.length) return;
       candidates.sort(
-        (a, b) => this.order.get(a.status) - this.order.get(b.status),
+        (a, b) => this.order.get(a.signal) - this.order.get(b.signal),
       );
       const job = candidates[0];
       this.queue.splice(this.queue.indexOf(job), 1);
@@ -71,6 +81,7 @@ export class PageScheduler {
         .finally(() => {
           job.signal.removeEventListener("abort", job.abort);
           this.running.delete(job);
+          this.releaseOrder(job.signal);
           this.drain();
         });
     }

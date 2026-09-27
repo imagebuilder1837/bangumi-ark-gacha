@@ -2,6 +2,7 @@ import { GachaSession } from "./gacha-session.mjs";
 import { GachaStorage } from "./collection-cache.mjs";
 import { createBangumiClient } from "./bangumi-client.mjs";
 import { STATUS_IDS } from "./shared.mjs";
+import { createBrowserAdapter } from "./browser-adapter.mjs";
 const ROUTE_RE =
   /\/(anime|book|game|real|music)\/list\/([^/]+)(?:\/([^/]+))?(?:\/|$)/;
 function start() {
@@ -18,12 +19,7 @@ function start() {
       document.body.querySelector('[data-bangumi-ark-gacha="launcher"]')
     )
       return;
-    const browser = {
-      origin: window.location.origin,
-      parse: (html) => new DOMParser().parseFromString(html, "text/html"),
-      setTimeout: (fn, ms) => window.setTimeout(fn, ms),
-      clearTimeout: (id) => window.clearTimeout(id),
-    };
+    const browser = createBrowserAdapter();
     new GachaSession(route, {
       storage: new GachaStorage(route.userId, route.subjectType),
       client: createBangumiClient({ ...route, browser }),

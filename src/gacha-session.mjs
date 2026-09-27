@@ -10,6 +10,7 @@ import { createBangumiClient } from "./bangumi-client.mjs";
 import { PageScheduler } from "./page-scheduler.mjs";
 import { DrawEngine } from "./draw-engine.mjs";
 import { GachaView } from "./gacha-view.mjs";
+import { createBrowserAdapter } from "./browser-adapter.mjs";
 
 const MAX_FALLBACK_PAGES = 10000;
 function sleep(ms, browser) {
@@ -25,12 +26,7 @@ export class GachaSession {
       now = Date.now,
       random = Math.random,
       createView = (session) => new GachaView(session),
-      browser = {
-        origin: window.location.origin,
-        parse: (html) => new DOMParser().parseFromString(html, "text/html"),
-        setTimeout: (fn, ms) => window.setTimeout(fn, ms),
-        clearTimeout: (id) => window.clearTimeout(id),
-      },
+      browser = createBrowserAdapter(),
     } = {},
   ) {
     this.userId = appRoute.userId;
@@ -135,7 +131,13 @@ export class GachaSession {
         if (refresh && existing.mode === "check") {
           existing.controller.abort();
           this.tasks.delete(status);
-          this.startTask(status, "update", !intent, intent);
+          this.startTask(
+            status,
+            "update",
+            existing.independent,
+            intent,
+            existing.intents,
+          );
         }
       } else {
         this.startTask(
@@ -148,12 +150,12 @@ export class GachaSession {
     }
     this.focus();
   }
-  startTask(status, mode, independent, intent) {
+  startTask(status, mode, independent, intent, previousIntents = []) {
     const task = {
       status,
       mode,
       independent,
-      intents: new Set(intent ? [intent] : []),
+      intents: new Set(intent ? [...previousIntents, intent] : previousIntents),
       controller: new AbortController(),
       progress: "",
       promise: null,
@@ -212,7 +214,7 @@ export class GachaSession {
     }
   }
   fail(task, error) {
-    const limited = /HTTP 429\b/.test(error.message);
+    const limited = error.status === 429;
     const affected = [...task.intents].filter((intent) => !intent.failed);
     for (const intent of affected) intent.failed = true;
     const currentAffected =
@@ -227,7 +229,7 @@ export class GachaSession {
       `[${this.statusLabels[task.status]}] 获取失败：${error.message}`,
       true,
     );
-    if (error.message === "请先登录 Bangumi")
+    if (error.code === "LOGIN_REQUIRED")
       this.view.setLoginNotice(error.message);
     for (const other of this.tasks.values()) {
       if (other === task) continue;

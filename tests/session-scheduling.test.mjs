@@ -133,6 +133,56 @@ test("independent wish survives failure of all; only all-owned states cancel", a
   dom.window.close();
 });
 
+test("refreshing all preserves a previously independent check's update when a sibling fails", async () => {
+  const { dom, session, requests, click } = setup();
+  session.storage.commitStatus("wish", [item(1)], meta);
+  click(".ark-gacha-launcher");
+  await flush();
+  click('[data-status="all"]');
+  await flush();
+  click("#ark-gacha-refresh");
+  await flush();
+  assert.equal(
+    requests.find((request) => request.status === "wish").signal.aborted,
+    true,
+  );
+  requests
+    .find((request) => request.status === "do")
+    .reject(new Error("HTTP 500"));
+  await flush();
+  await flush();
+  const newWish = requests.filter((request) => request.status === "wish")[1];
+  assert.ok(
+    newWish,
+    "independent update should dispatch after old work releases its slot",
+  );
+  assert.equal(newWish.signal.aborted, false);
+  newWish.resolve(page([item(2)]));
+  await flush();
+  assert.deepEqual(ids(session, "wish"), ["2"]);
+  dom.window.close();
+});
+
+test("replacing an all-owned check keeps its all dependency when it fails", async () => {
+  const { dom, session, requests, click } = setup();
+  for (const status of STATUS_IDS)
+    session.storage.commitStatus(status, [item(1)], meta);
+  click('[data-status="all"]');
+  await flush();
+  click('[data-status="do"]');
+  await flush();
+  click("#ark-gacha-refresh");
+  await flush();
+  const doing = requests.filter((request) => request.status === "do");
+  assert.equal(doing[0].signal.aborted, true);
+  doing[1].reject(new Error("HTTP 500"));
+  await flush();
+  assert.ok(
+    requests.find((request) => request.status === "wish").signal.aborted,
+  );
+  dom.window.close();
+});
+
 test("selecting an all-owned state independently keeps it alive after another fails", async () => {
   const { dom, session, requests, click } = setup();
   click('[data-status="all"]');
@@ -185,7 +235,9 @@ test("429 cancels independent background tasks, but manual refresh can resume", 
   await flush();
   click('[data-status="do"]');
   await flush();
-  requests.find((r) => r.status === "wish").reject(new Error("HTTP 429"));
+  requests
+    .find((r) => r.status === "wish")
+    .reject(Object.assign(new Error("rate limited"), { status: 429 }));
   await flush();
   assert.ok(requests.find((r) => r.status === "do").signal.aborted);
   click("#ark-gacha-refresh");
@@ -203,9 +255,26 @@ test("background 429 after foreground completion does not prompt a different sco
   click('[data-status="do"]');
   await flush();
   await settle(requests, "do");
-  requests[0].reject(new Error("HTTP 429"));
+  requests[0].reject(Object.assign(new Error("rate limited"), { status: 429 }));
   await flush();
   assert.equal(document.querySelector("#ark-gacha-confirm").hidden, true);
+  dom.window.close();
+});
+
+test("login notice uses the error code, not its wording", async () => {
+  const { dom, requests, click } = setup();
+  click(".ark-gacha-launcher");
+  await flush();
+  requests[0].reject(
+    Object.assign(new Error("authentication required"), {
+      code: "LOGIN_REQUIRED",
+    }),
+  );
+  await flush();
+  assert.match(
+    document.querySelector("#ark-gacha-progress").textContent,
+    /authentication required/,
+  );
   dom.window.close();
 });
 

@@ -1,4 +1,10 @@
-import { uniqueItems, normalizeItem, subjectIdFromLink } from "./shared.mjs";
+import {
+  uniqueItems,
+  normalizeItem,
+  subjectIdFromLink,
+  validCalendarDate,
+} from "./shared.mjs";
+import { createBrowserAdapter } from "./browser-adapter.mjs";
 class SubjectParser {
   extractScore(doc) {
     const selectors = [
@@ -61,6 +67,13 @@ class SubjectParser {
     return match ? Number(match[0]) : null;
   }
 
+  validatedDate(year, month, day, isPartial = false) {
+    const date = `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+    return !validCalendarDate(date)
+      ? { date: null, isPartial: false }
+      : { date, isPartial };
+  }
+
   normalizeDate(dateValue) {
     if (!dateValue) return { date: null, isPartial: false };
     const dateString = String(dateValue).trim().replace(/T.*$/, "");
@@ -72,34 +85,14 @@ class SubjectParser {
       };
 
     const full = dateString.match(/^(\d{4})[-/]([01]?\d)[-/]([0-3]?\d)/);
-    if (full) {
-      const date = `${full[1]}-${full[2].padStart(2, "0")}-${full[3].padStart(2, "0")}`;
-      const parsed = new Date(`${date}T00:00:00`);
-      return Number.isNaN(parsed.getTime())
-        ? { date: null, isPartial: false }
-        : { date, isPartial: false };
-    }
+    if (full) return this.validatedDate(full[1], full[2], full[3]);
 
     const month = dateString.match(/^(\d{4})[-/]([01]?\d)$/);
-    if (month)
-      return {
-        date: `${month[1]}-${month[2].padStart(2, "0")}-01`,
-        isPartial: true,
-      };
+    if (month) return this.validatedDate(month[1], month[2], "01", true);
     const cnFull = dateString.match(/^(\d{4})年\s*([01]?\d)月\s*([0-3]?\d)日$/);
-    if (cnFull) {
-      const date = `${cnFull[1]}-${cnFull[2].padStart(2, "0")}-${cnFull[3].padStart(2, "0")}`;
-      const parsed = new Date(`${date}T00:00:00`);
-      return Number.isNaN(parsed.getTime())
-        ? { date: null, isPartial: false }
-        : { date, isPartial: false };
-    }
+    if (cnFull) return this.validatedDate(cnFull[1], cnFull[2], cnFull[3]);
     const cnMonth = dateString.match(/^(\d{4})年\s*([01]?\d)月$/);
-    if (cnMonth)
-      return {
-        date: `${cnMonth[1]}-${cnMonth[2].padStart(2, "0")}-01`,
-        isPartial: true,
-      };
+    if (cnMonth) return this.validatedDate(cnMonth[1], cnMonth[2], "01", true);
     const year = dateString.match(/^(\d{4})(?:年)?$/);
     if (year) return { date: `${year[1]}-01-01`, isPartial: true };
     return { date: null, isPartial: false };
@@ -165,7 +158,9 @@ export function pageInfo(doc, origin) {
 export function parseListPage(doc, origin) {
   if (!doc.querySelector("#browserItemList")) {
     if (doc.querySelector('form[action*="login"], a[href*="/login"]'))
-      throw new Error("请先登录 Bangumi");
+      throw Object.assign(new Error("请先登录 Bangumi"), {
+        code: "LOGIN_REQUIRED",
+      });
     throw new Error("收藏列表结构无效");
   }
   const entries = Array.from(doc.querySelectorAll("#browserItemList li.item"));
@@ -220,7 +215,10 @@ async function fetchText(url, options = {}, transport = fetch, browser) {
       cache,
       signal: controller.signal,
     });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    if (!response.ok)
+      throw Object.assign(new Error(`HTTP ${response.status}`), {
+        status: response.status,
+      });
     return await response.text();
   } catch (error) {
     if (timedOut) throw new Error(`请求超时：${url}`);
@@ -236,12 +234,7 @@ export function createBangumiClient({
   subjectType,
   userId,
   transport = fetch,
-  browser = {
-    origin: window.location.origin,
-    parse: (html) => new DOMParser().parseFromString(html, "text/html"),
-    setTimeout: (fn, ms) => window.setTimeout(fn, ms),
-    clearTimeout: (id) => window.clearTimeout(id),
-  },
+  browser = createBrowserAdapter(),
 }) {
   return {
     async fetchListPage(status, page, signal, noStore = false) {

@@ -38,6 +38,56 @@ test("four slots are shared; foreground in flight reserves idle slots and backgr
   assert.equal(requests.length, 5, "cancelled queued requests never dispatch");
 });
 
+test("background work resumes by task creation, not a status's earlier history", async () => {
+  const { scheduler, requests } = fixture();
+  const controls = Array.from({ length: 4 }, () => new AbortController());
+  const oldWish = scheduler.request("wish", 1, controls[0].signal);
+  await flush();
+  requests[0].resolve("done");
+  await oldWish;
+  await flush();
+
+  scheduler.setForeground(["collect"]);
+  const collect = scheduler.request("collect", 1, controls[1].signal);
+  const doing = scheduler.request("do", 1, controls[2].signal);
+  const newWish = scheduler.request("wish", 1, controls[3].signal);
+  await flush();
+  assert.deepEqual(
+    requests.map(({ status }) => status),
+    ["wish", "collect"],
+  );
+  scheduler.setForeground([]);
+  await flush();
+  assert.deepEqual(
+    requests.map(({ status }) => status),
+    ["wish", "collect", "do", "wish"],
+  );
+  requests.slice(1).forEach((request) => request.resolve("done"));
+  await Promise.all([collect, doing, newWish]);
+});
+
+test("a replacement task cannot inherit priority from its canceled in-flight predecessor", async () => {
+  const { scheduler, requests } = fixture();
+  const controls = Array.from({ length: 4 }, () => new AbortController());
+  const oldWish = scheduler.request("wish", 1, controls[0].signal);
+  await flush();
+  scheduler.setForeground(["collect"]);
+  const collect = scheduler.request("collect", 1, controls[1].signal);
+  const doing = scheduler.request("do", 1, controls[2].signal);
+  controls[0].abort();
+  await assert.rejects(oldWish, /Abort/);
+  const newWish = scheduler.request("wish", 1, controls[3].signal);
+  await flush();
+  scheduler.setForeground([]);
+  await flush();
+  assert.deepEqual(
+    requests.map(({ status }) => status),
+    ["wish", "collect", "do", "wish"],
+  );
+  requests.forEach((request) => request.resolve("done"));
+  await Promise.all([collect, doing, newWish]);
+});
+
 test("an uncooperative transport keeps its slot until the aborted request settles", async () => {
   const { scheduler, requests } = fixture();
   const controls = Array.from({ length: 5 }, () => new AbortController());
