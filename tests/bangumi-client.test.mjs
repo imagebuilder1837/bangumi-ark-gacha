@@ -138,6 +138,31 @@ test("login and malformed list pages cannot be treated as empty collections", as
   dom.window.close();
 });
 
+test("unrecognized subject rows cannot be published as an empty collection", async () => {
+  const dom = browser();
+  for (const html of [
+    '<ul id="browserItemList"><li><h3><a href="/subject/42">作品</a></h3></li></ul>',
+    '<ul id="browserItemList"><li class="item"><h3><a href="/subject/42">作品</a></h3></li><li><h3><a href="/subject/43">另一作品</a></h3></li></ul>',
+  ]) {
+    const client = createBangumiClient({
+      subjectType: "anime",
+      userId: "test",
+      transport: async () => ({ ok: true, text: async () => html }),
+    });
+    await assert.rejects(client.fetchListPage("wish", 1), /结构无效/);
+  }
+  const emptyClient = createBangumiClient({
+    subjectType: "anime",
+    userId: "test",
+    transport: async () => ({
+      ok: true,
+      text: async () => '<ul id="browserItemList">\n  </ul>',
+    }),
+  });
+  assert.deepEqual((await emptyClient.fetchListPage("wish", 1)).items, []);
+  dom.window.close();
+});
+
 test("HTTP errors are rejected rather than reported as an empty page", async () => {
   const dom = browser();
   const client = createBangumiClient({

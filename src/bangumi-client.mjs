@@ -156,14 +156,22 @@ export function pageInfo(doc, origin) {
 }
 
 export function parseListPage(doc, origin) {
-  if (!doc.querySelector("#browserItemList")) {
+  const list = doc.querySelector("#browserItemList");
+  if (!list) {
     if (doc.querySelector('form[action*="login"], a[href*="/login"]'))
       throw Object.assign(new Error("请先登录 Bangumi"), {
         code: "LOGIN_REQUIRED",
       });
     throw new Error("收藏列表结构无效");
   }
-  const entries = Array.from(doc.querySelectorAll("#browserItemList li.item"));
+  const entries = Array.from(list.children);
+  if (
+    entries.some((li) => !li.matches("li.item")) ||
+    Array.from(list.childNodes).some(
+      (node) => node.nodeType === 3 && node.textContent.trim(),
+    )
+  )
+    throw new Error("收藏列表结构无效");
   if (
     entries.some((li) => {
       const link = li.querySelector("h3 a[href*='/subject/']");

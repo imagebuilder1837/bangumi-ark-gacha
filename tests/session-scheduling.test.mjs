@@ -88,6 +88,48 @@ test("unknown pagination discovers denominator atomically, counts terminal empty
   dom.window.close();
 });
 
+test("a reliable page count discovered during probing rejects an earlier empty page", async () => {
+  const { dom, session, requests, click } = setup();
+  session.storage.commitStatus("wish", [item(9)], meta);
+  click(".ark-gacha-launcher");
+  await flush();
+  await settle(requests, "wish", page([item(1)]));
+  await settle(requests, "wish", page([item(1)], 1, false));
+  await settle(requests, "wish", page([item(2)], 4));
+  await settle(requests, "wish", page([], 1, false));
+  assert.deepEqual(ids(session, "wish"), ["9"]);
+  assert.ok(document.querySelector('[data-action="keep"]'));
+  dom.window.close();
+});
+
+test("a reliable page count discovered during probing ends only at that page", async () => {
+  const { dom, session, requests, click } = setup();
+  click(".ark-gacha-launcher");
+  await flush();
+  await settle(requests, "wish", page([item(1)], 1, false));
+  await settle(requests, "wish", page([item(2)], 4));
+  await settle(requests, "wish", page([item(3)], 1, false));
+  assert.equal(requests[3].page, 4);
+  await settle(requests, "wish", page([item(4)], 1, false));
+  assert.deepEqual(ids(session, "wish"), ["1", "2", "3", "4"]);
+  assert.equal(requests.length, 4);
+  dom.window.close();
+});
+
+test("a changing reliable page count during probing preserves the old collection", async () => {
+  const { dom, session, requests, click } = setup();
+  session.storage.commitStatus("wish", [item(9)], meta);
+  click(".ark-gacha-launcher");
+  await flush();
+  await settle(requests, "wish", page([item(1)]));
+  await settle(requests, "wish", page([item(1)], 1, false));
+  await settle(requests, "wish", page([item(2)], 4));
+  await settle(requests, "wish", page([item(3)], 5));
+  assert.deepEqual(ids(session, "wish"), ["9"]);
+  assert.equal(requests.length, 4);
+  dom.window.close();
+});
+
 test("without foreground work progress follows the most recently updated background task", async () => {
   const { dom, requests, click } = setup();
   click(".ark-gacha-launcher");

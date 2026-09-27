@@ -378,16 +378,22 @@
   }
 
   function parseListPage(doc, origin) {
-    if (!doc.querySelector("#browserItemList")) {
+    const list = doc.querySelector("#browserItemList");
+    if (!list) {
       if (doc.querySelector('form[action*="login"], a[href*="/login"]'))
         throw Object.assign(new Error("请先登录 Bangumi"), {
           code: "LOGIN_REQUIRED",
         });
       throw new Error("收藏列表结构无效");
     }
-    const entries = Array.from(
-      doc.querySelectorAll("#browserItemList li.item"),
-    );
+    const entries = Array.from(list.children);
+    if (
+      entries.some((li) => !li.matches("li.item")) ||
+      Array.from(list.childNodes).some(
+        (node) => node.nodeType === 3 && node.textContent.trim(),
+      )
+    )
+      throw new Error("收藏列表结构无效");
     if (
       entries.some((li) => {
         const link = li.querySelector("h3 a[href*='/subject/']");
@@ -1514,6 +1520,13 @@
         throw new Error("分页数据无效");
       const signatures = new Set([firstPageFingerprint(first.items)]);
       const pages = new Map([[1, first.items]]);
+      const recordPage = (page, items) => {
+        const signature = firstPageFingerprint(items);
+        if (items.length && signatures.has(signature))
+          throw new Error(`第 ${page} 页重复，无法确认分页末页`);
+        signatures.add(signature);
+        pages.set(page, items);
+      };
       if (reliable) {
         if (!first.items.length && totalPages !== 1)
           throw new Error("分页数据矛盾");
@@ -1535,16 +1548,13 @@
               throw new Error("分页数据矛盾");
             if (!result.items.length)
               throw new Error(`第 ${page} 页为空，分页数据可能不完整`);
-            const signature = firstPageFingerprint(result.items);
-            if (result.items.length && signatures.has(signature))
-              throw new Error(`第 ${page} 页重复，无法确认分页末页`);
-            signatures.add(signature);
-            pages.set(page, result.items);
+            recordPage(page, result.items);
             this.progress(task, pages.size, totalPages);
           }),
         );
       } else {
         let page = 1;
+        let discoveredTotalPages = null;
         while (true) {
           if (signal.aborted) return;
           if (!pages.get(page).length) {
@@ -1556,23 +1566,23 @@
           ++page;
           const result = await this.scheduler.request(status, page, signal);
           if (signal.aborted) return;
-          if (
-            result.pageInfo.reliable &&
-            ((result.pageInfo.currentPage != null &&
-              result.pageInfo.currentPage !== page) ||
-              result.pageInfo.totalPages < page ||
-              !result.items.length)
-          )
+          if (result.pageInfo.reliable) {
+            const { totalPages: reportedTotal, currentPage } = result.pageInfo;
+            if (
+              !Number.isSafeInteger(reportedTotal) ||
+              reportedTotal > MAX_FALLBACK_PAGES ||
+              reportedTotal < page ||
+              (currentPage != null && currentPage !== page) ||
+              (discoveredTotalPages !== null &&
+                reportedTotal !== discoveredTotalPages)
+            )
+              throw new Error("分页数据矛盾");
+            discoveredTotalPages = reportedTotal;
+          }
+          if (!result.items.length && discoveredTotalPages !== null)
             throw new Error("分页数据矛盾");
-          const signature = firstPageFingerprint(result.items);
-          if (result.items.length && signatures.has(signature))
-            throw new Error(`第 ${page} 页重复，无法确认分页末页`);
-          signatures.add(signature);
-          pages.set(page, result.items);
-          if (
-            !result.items.length ||
-            (result.pageInfo.reliable && result.pageInfo.totalPages === page)
-          ) {
+          recordPage(page, result.items);
+          if (!result.items.length || page === discoveredTotalPages) {
             this.progress(task, page, page);
             break;
           }
