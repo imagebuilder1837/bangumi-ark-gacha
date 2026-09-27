@@ -91,6 +91,7 @@ export class GachaSession {
   }
   loadView() {
     this.loaded = true;
+    this.view.hideConfirm();
     this.refreshPool();
     this.updateResultMessage();
     this.acquire(false);

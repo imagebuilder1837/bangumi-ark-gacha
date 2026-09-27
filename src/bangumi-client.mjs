@@ -245,15 +245,10 @@ export function createBangumiClient({
   browser = createBrowserAdapter(),
 }) {
   return {
-    async fetchListPage(status, page, signal, noStore = false) {
+    async fetchListPage(status, page, signal, { cache = "default" } = {}) {
       const path = `/${subjectType}/list/${encodeURIComponent(userId)}/${status}`;
       const url = page === 1 ? path : `${path}?page=${page}`;
-      const html = await fetchText(
-        url,
-        { signal, cache: noStore ? "no-store" : "default" },
-        transport,
-        browser,
-      );
+      const html = await fetchText(url, { signal, cache }, transport, browser);
       const doc = browser.parse(html);
       return {
         items: uniqueItems(parseListPage(doc, browser.origin), browser.origin),

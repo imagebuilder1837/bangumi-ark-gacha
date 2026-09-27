@@ -87,6 +87,23 @@ test("client accepts an injected browser parser, origin and timeout clock", asyn
   dom.window.close();
 });
 
+test("list fetch options select the requested HTTP cache mode", async () => {
+  const dom = browser();
+  const cacheModes = [];
+  const client = createBangumiClient({
+    subjectType: "anime",
+    userId: "test",
+    transport: async (_url, { cache }) => {
+      cacheModes.push(cache);
+      return { ok: true, text: async () => '<ul id="browserItemList"></ul>' };
+    },
+  });
+  await client.fetchListPage("wish", 1, undefined, { cache: "default" });
+  await client.fetchListPage("wish", 2, undefined, { cache: "no-store" });
+  assert.deepEqual(cacheModes, ["default", "no-store"]);
+  dom.window.close();
+});
+
 test("list timeout starts on dispatch and uses the injected clock", async () => {
   const dom = browser();
   let timeout;
@@ -163,16 +180,29 @@ test("unrecognized subject rows cannot be published as an empty collection", asy
   dom.window.close();
 });
 
-test("HTTP errors are rejected rather than reported as an empty page", async () => {
+test("403, 5xx and 429 fail on the first list response without Retry-After handling", async () => {
   const dom = browser();
-  const client = createBangumiClient({
-    subjectType: "anime",
-    userId: "test",
-    transport: async () => ({ ok: false, status: 403 }),
-  });
-  await assert.rejects(client.fetchListPage("wish", 1), {
-    message: "HTTP 403",
-    status: 403,
-  });
+  for (const status of [403, 500, 503, 429]) {
+    let calls = 0;
+    const client = createBangumiClient({
+      subjectType: "anime",
+      userId: "test",
+      transport: async () => {
+        calls++;
+        return {
+          ok: false,
+          status,
+          get headers() {
+            throw new Error("Retry-After must not be consulted");
+          },
+        };
+      },
+    });
+    await assert.rejects(client.fetchListPage("wish", 1), {
+      message: `HTTP ${status}`,
+      status,
+    });
+    assert.equal(calls, 1);
+  }
   dom.window.close();
 });

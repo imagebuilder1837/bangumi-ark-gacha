@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { PageScheduler } from "../src/page-scheduler.mjs";
+import { createBangumiClient } from "../src/bangumi-client.mjs";
+import { browser } from "./support/browser.mjs";
 import { flush } from "./support/session.mjs";
 
 function fixture() {
@@ -105,6 +107,73 @@ test("an uncooperative transport keeps its slot until the aborted request settle
   assert.equal(requests.length, 5);
   requests.slice(1).forEach((request) => request.resolve("done"));
   await Promise.all(pending.slice(1));
+});
+
+test("queued list pages do not start their HTTP timeout until dispatch", async () => {
+  const dom = browser();
+  const timers = new Map();
+  const dispatched = [];
+  let nextTimer = 0;
+  const client = createBangumiClient({
+    subjectType: "anime",
+    userId: "test",
+    browser: {
+      origin: "https://bgm.tv",
+      parse: (html) =>
+        new dom.window.DOMParser().parseFromString(html, "text/html"),
+      setTimeout(fn, ms) {
+        assert.equal(ms, 10000);
+        const id = ++nextTimer;
+        timers.set(id, fn);
+        return id;
+      },
+      clearTimeout(id) {
+        timers.delete(id);
+      },
+    },
+    transport: (url, { signal }) =>
+      new Promise((resolve, reject) => {
+        dispatched.push({ url, resolve });
+        signal.addEventListener("abort", () => reject(new Error("aborted")), {
+          once: true,
+        });
+      }),
+  });
+  const scheduler = new PageScheduler(client, 1);
+  const control = new AbortController();
+  const first = scheduler.request("wish", 1, control.signal);
+  const second = scheduler.request("wish", 2, control.signal);
+  await flush();
+  assert.equal(dispatched.length, 1);
+  assert.equal(timers.size, 1);
+  dispatched[0].resolve({
+    ok: true,
+    text: async () => '<ul id="browserItemList"></ul>',
+  });
+  await first;
+  await flush();
+  assert.equal(dispatched.length, 2);
+  assert.equal(timers.size, 1);
+  timers.values().next().value();
+  await assert.rejects(second, /请求超时/);
+  dom.window.close();
+});
+
+test("scheduler requests fresh list pages without using the browser cache", async () => {
+  const dom = browser();
+  const cacheModes = [];
+  const client = createBangumiClient({
+    subjectType: "anime",
+    userId: "test",
+    transport: async (_url, { cache }) => {
+      cacheModes.push(cache);
+      return { ok: true, text: async () => '<ul id="browserItemList"></ul>' };
+    },
+  });
+  const scheduler = new PageScheduler(client);
+  await scheduler.request("wish", 1, new AbortController().signal);
+  assert.deepEqual(cacheModes, ["no-store"]);
+  dom.window.close();
 });
 
 test("switching priority does not cancel old in-flight work and lifts queued work", async () => {

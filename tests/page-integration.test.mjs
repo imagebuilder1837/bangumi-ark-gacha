@@ -39,6 +39,29 @@ test("real request adapter, session and DOM publish a complete state despite ano
   dom.window.close();
 });
 
+test("403 and 5xx surface a failure without starting an automatic session retry", async () => {
+  for (const status of [403, 503]) {
+    const dom = environment();
+    const urls = [];
+    const client = createBangumiClient({
+      subjectType: "anime",
+      userId: "test",
+      transport: async (url) => {
+        urls.push(url);
+        return { ok: false, status };
+      },
+    });
+    new GachaSession(
+      { userId: "test", subjectType: "anime", status: "wish" },
+      { client },
+    ).open();
+    await flush();
+    assert.deepEqual(urls, ["/anime/list/test/wish"]);
+    assert.equal(document.querySelector("#ark-gacha-confirm").hidden, false);
+    dom.window.close();
+  }
+});
+
 test("real HTML list/score parsing and card interaction use actual selectors", async () => {
   const dom = environment();
   const list =

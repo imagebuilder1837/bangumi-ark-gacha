@@ -48,6 +48,47 @@ test("known pages run concurrently, failed page cancels siblings and preserves c
   dom.window.close();
 });
 
+test("a repeated nonempty page cannot replace a complete cached collection", async () => {
+  const { dom, session, requests, click } = setup();
+  session.storage.commitStatus("wish", [item(9)], meta);
+  click(".ark-gacha-launcher");
+  await flush();
+  await settle(requests, "wish", page([item(1)]));
+  await settle(requests, "wish", page([item(1)], 2));
+  await settle(requests, "wish", page([item(1)], 2));
+  assert.deepEqual(ids(session, "wish"), ["9"]);
+  assert.ok(document.querySelector('[data-action="keep"]'));
+  dom.window.close();
+});
+
+test("a reported page count beyond the safety limit preserves the old collection", async () => {
+  const { dom, session, requests, click } = setup();
+  session.storage.commitStatus("wish", [item(9)], meta);
+  click(".ark-gacha-launcher");
+  await flush();
+  await settle(requests, "wish", page([item(1)]));
+  await settle(requests, "wish", page([item(1)], 10001));
+  assert.deepEqual(ids(session, "wish"), ["9"]);
+  assert.equal(requests.length, 2);
+  assert.ok(document.querySelector('[data-action="keep"]'));
+  dom.window.close();
+});
+
+test("an empty first page is complete only when pagination agrees", async () => {
+  const { dom, session, requests, click } = setup();
+  click(".ark-gacha-launcher");
+  await flush();
+  await settle(requests, "wish", page([], 2));
+  assert.equal(session.storage.getStatus("wish"), null);
+  assert.ok(document.querySelector('[data-action="refresh"]'));
+  click('[data-action="refresh"]');
+  await flush();
+  await settle(requests, "wish", page([]));
+  assert.deepEqual(ids(session, "wish"), []);
+  assert.equal(session.complete, true);
+  dom.window.close();
+});
+
 test("unknown pagination discovers denominator atomically, counts terminal empty page", async () => {
   const { dom, session, requests, click } = setup();
   click(".ark-gacha-launcher");
@@ -150,6 +191,46 @@ test("without foreground work progress follows the most recently updated backgro
     document.querySelector("#ark-gacha-progress").textContent,
     /在看.*2\/3/,
   );
+  dom.window.close();
+});
+
+test("pending score lookups do not consume the four list-request slots", async () => {
+  const { dom, session, requests, click } = setup();
+  session.storage.commitStatus("wish", [item(1), item(2), item(3)], meta);
+  const scores = [];
+  session.client.fetchSubject = (id) =>
+    new Promise((resolve) => scores.push({ id, resolve }));
+  click(".ark-gacha-launcher");
+  await flush();
+  click("#ark-gacha-run-3");
+  await flush();
+  assert.equal(scores.length, 3);
+  click('[data-status="all"]');
+  await flush();
+  assert.equal(requests.length, 4);
+  assert.equal(requests.filter(({ signal }) => !signal.aborted).length, 4);
+  for (const score of scores)
+    score.resolve({
+      score: 8,
+      hasScore: true,
+      resolved: true,
+      source: "subject",
+    });
+  await flush();
+  dom.window.close();
+});
+
+test("closing the dialog keeps a pending collection update alive", async () => {
+  const { dom, session, requests, click } = setup();
+  click(".ark-gacha-launcher");
+  await flush();
+  click(".ark-gacha-mask");
+  assert.equal(requests[0].signal.aborted, false);
+  await settle(requests, "wish", page([item(1)]));
+  assert.deepEqual(ids(session, "wish"), ["1"]);
+  click(".ark-gacha-launcher");
+  await flush();
+  assert.equal(requests.length, 1);
   dom.window.close();
 });
 
@@ -287,6 +368,24 @@ test("429 cancels independent background tasks, but manual refresh can resume", 
   assert.equal(requests.filter((r) => r.status === "do").length, 2);
   await settle(requests.slice(2), "do");
   assert.deepEqual(ids(session, "do"), []);
+  dom.window.close();
+});
+
+test("switching and reopening after 429 may initiate normal requests without a lock", async () => {
+  const { dom, requests, click } = setup();
+  click(".ark-gacha-launcher");
+  await flush();
+  requests[0].reject(Object.assign(new Error("HTTP 429"), { status: 429 }));
+  await flush();
+  click(".ark-gacha-mask");
+  click(".ark-gacha-launcher");
+  await flush();
+  assert.equal(requests.filter(({ status }) => status === "wish").length, 2);
+  assert.equal(document.querySelector("#ark-gacha-confirm").hidden, true);
+  click('[data-status="do"]');
+  await flush();
+  assert.equal(requests.filter(({ status }) => status === "do").length, 1);
+  assert.equal(requests[1].signal.aborted, false);
   dom.window.close();
 });
 

@@ -60,6 +60,30 @@ test("missing scope has no keep option; reopening a loaded view does not recheck
   dom.window.close();
 });
 
+test("reopening after a current-scope failure retries without retaining the old failure prompt", async () => {
+  const { dom, session, requests, click } = setup();
+  click(".ark-gacha-launcher");
+  await flush();
+  requests[0].reject(new Error("offline"));
+  await flush();
+  assert.equal(document.querySelector("#ark-gacha-confirm").hidden, false);
+  click(".ark-gacha-mask");
+  click(".ark-gacha-launcher");
+  await flush();
+  assert.equal(requests.length, 2);
+  assert.equal(document.querySelector("#ark-gacha-confirm").hidden, true);
+  requests[1].reject(new Error("still offline"));
+  await flush();
+  assert.equal(document.querySelector("#ark-gacha-confirm").hidden, false);
+  click('[data-action="refresh"]');
+  await flush();
+  requests[2].resolve(empty);
+  await flush();
+  assert.deepEqual(session.storage.getItems("wish"), []);
+  assert.equal(document.querySelector("#ark-gacha-confirm").hidden, true);
+  dom.window.close();
+});
+
 test("all needs five complete statuses; empty counts as complete and publication is per status", async () => {
   const { dom, session, requests, click } = setup();
   for (const status of STATUS_IDS.slice(1))

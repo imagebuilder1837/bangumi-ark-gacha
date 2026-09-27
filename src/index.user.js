@@ -467,12 +467,12 @@
     browser = createBrowserAdapter(),
   }) {
     return {
-      async fetchListPage(status, page, signal, noStore = false) {
+      async fetchListPage(status, page, signal, { cache = "default" } = {}) {
         const path = `/${subjectType}/list/${encodeURIComponent(userId)}/${status}`;
         const url = page === 1 ? path : `${path}?page=${page}`;
         const html = await fetchText(
           url,
-          { signal, cache: noStore ? "no-store" : "default" },
+          { signal, cache },
           transport,
           browser,
         );
@@ -502,6 +502,8 @@
 
   // The single list-request gate for one page. Cancellation removes queued work as well
   // as aborting work already dispatched; the client starts its timeout at dispatch.
+  const abortError = () => new DOMException("Aborted", "AbortError");
+
   class PageScheduler {
     constructor(client, limit = 4) {
       this.client = client;
@@ -519,8 +521,7 @@
     }
 
     request(status, page, signal) {
-      if (signal.aborted)
-        return Promise.reject(new DOMException("Aborted", "AbortError"));
+      if (signal.aborted) return Promise.reject(abortError());
       if (!this.order.has(signal)) this.order.set(signal, this.nextOrder++);
       return new Promise((resolve, reject) => {
         const job = {
@@ -534,7 +535,7 @@
         job.abort = () => {
           this.queue = this.queue.filter((entry) => entry !== job);
           job.controller.abort();
-          reject(new DOMException("Aborted", "AbortError"));
+          reject(abortError());
           this.releaseOrder(signal);
           this.drain();
         };
@@ -570,13 +571,12 @@
         this.running.add(job);
         Promise.resolve()
           .then(() => {
-            if (job.signal.aborted)
-              throw new DOMException("Aborted", "AbortError");
+            if (job.signal.aborted) throw abortError();
             return this.client.fetchListPage(
               job.status,
               job.page,
               job.controller.signal,
-              true,
+              { cache: "no-store" },
             );
           })
           .then(job.resolve, job.reject)
@@ -1340,6 +1340,7 @@
     }
     loadView() {
       this.loaded = true;
+      this.view.hideConfirm();
       this.refreshPool();
       this.updateResultMessage();
       this.acquire(false);
