@@ -51,6 +51,8 @@ export class GachaSession {
     this.busy = false;
     this.selectionId = 0;
     this.tasks = new Map();
+    // 本页面加载内已完成核验或全量更新的状态；失败时移除，下次进入重新核验。
+    this.synced = new Set();
     this.progressVersion = 0;
     this.view = createView(this);
   }
@@ -141,6 +143,7 @@ export class GachaSession {
           );
         }
       } else {
+        if (!refresh && this.synced.has(status)) continue;
         this.startTask(
           status,
           refresh || !this.storage.getStatus(status) ? "update" : "check",
@@ -185,6 +188,7 @@ export class GachaSession {
         const meta = this.storage.getMeta(status);
         if (!meta || firstPageFingerprint(remote.items) !== meta.fingerprint)
           task.mode = "update";
+        else this.synced.add(status);
       }
       if (task.mode === "update") {
         const result = await this.fetchAllStatus(task);
@@ -197,6 +201,7 @@ export class GachaSession {
           checkedAt: this.now(),
           updatedAt: this.now(),
         });
+        this.synced.add(status);
         this.refreshPool();
       }
       if (!controller.signal.aborted) {
@@ -214,6 +219,7 @@ export class GachaSession {
     }
   }
   fail(task, error) {
+    this.synced.delete(task.status);
     const limited = error.status === 429;
     const affected = [...task.intents].filter((intent) => !intent.failed);
     for (const intent of affected) intent.failed = true;

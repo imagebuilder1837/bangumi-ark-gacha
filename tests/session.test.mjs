@@ -125,6 +125,119 @@ test("a matching check completes silently; only an actual update notifies", asyn
   dom.window.close();
 });
 
+test("switching back to a synced status does not verify again", async () => {
+  const { dom, session, requests, click } = setup();
+  session.storage.commitStatus("wish", [], meta);
+  click(".ark-gacha-launcher");
+  await flush();
+  requests[0].resolve(page([]));
+  await flush();
+  click('[data-status="do"]');
+  await flush();
+  requests[1].resolve(empty);
+  await flush();
+  click('[data-status="wish"]');
+  await flush();
+  assert.equal(requests.length, 2, "再次进入已同步的状态不应重新核验");
+  dom.window.close();
+});
+
+test("a failed check is retried when entering the status again", async () => {
+  const { dom, session, requests, click } = setup();
+  session.storage.commitStatus("wish", [], meta);
+  click(".ark-gacha-launcher");
+  await flush();
+  requests[0].reject(new Error("offline"));
+  await flush();
+  click('[data-status="do"]');
+  await flush();
+  requests[1].resolve(empty);
+  await flush();
+  click('[data-status="wish"]');
+  await flush();
+  assert.equal(requests.length, 3, "核验失败后再次进入应重新核验");
+  requests[2].resolve(page([]));
+  await flush();
+  dom.window.close();
+});
+
+test("a completed background update also counts as synced", async () => {
+  const { dom, session, requests, click } = setup();
+  session.storage.commitStatus("wish", [item(1), item(2), item(3)], meta);
+  click(".ark-gacha-launcher");
+  await flush();
+  requests[0].resolve(page([item(4)], 2));
+  await flush();
+  requests[1].resolve(page([item(4), item(5)]));
+  await flush();
+  click('[data-status="do"]');
+  await flush();
+  requests[2].resolve(empty);
+  await flush();
+  click('[data-status="wish"]');
+  await flush();
+  assert.equal(requests.length, 3, "全量更新成功后再次进入不应重新核验");
+  dom.window.close();
+});
+
+test("a failed background update is re-checked when entering the status again", async () => {
+  const { dom, session, requests, click } = setup();
+  session.storage.commitStatus("wish", [item(1), item(2), item(3)], meta);
+  click(".ark-gacha-launcher");
+  await flush();
+  requests[0].resolve(page([item(4)], 2));
+  await flush();
+  requests[1].reject(new Error("offline"));
+  await flush();
+  click('[data-status="do"]');
+  await flush();
+  requests[2].resolve(empty);
+  await flush();
+  click('[data-status="wish"]');
+  await flush();
+  assert.equal(requests.length, 4, "全量更新失败后再次进入应重新核验");
+  requests[3].resolve(page([item(1), item(2), item(3)]));
+  await flush();
+  dom.window.close();
+});
+
+test("a successful manual refresh also counts as synced", async () => {
+  const { dom, session, requests, click } = setup();
+  session.storage.commitStatus("wish", [], meta);
+  click(".ark-gacha-launcher");
+  await flush();
+  requests[0].reject(new Error("offline"));
+  await flush();
+  click('[data-action="refresh"]');
+  await flush();
+  requests[1].resolve(empty);
+  await flush();
+  click('[data-status="do"]');
+  await flush();
+  requests[2].resolve(empty);
+  await flush();
+  click('[data-status="wish"]');
+  await flush();
+  assert.equal(requests.length, 3, "手动全量更新成功后再次进入不应重新核验");
+  dom.window.close();
+});
+
+test("manual refresh on a synced status still issues a full update", async () => {
+  const { dom, session, requests, click } = setup({ ignoreAbort: true });
+  session.storage.commitStatus("wish", [], meta);
+  click(".ark-gacha-launcher");
+  await flush();
+  requests[0].resolve(page([]));
+  await flush();
+  click("#ark-gacha-refresh");
+  await flush();
+  assert.equal(requests.length, 2, "手动刷新应始终直接全量更新");
+  assert.equal(requests[1].page, 1, "全量更新应从第一页重新获取");
+  requests[1].resolve(empty);
+  await flush();
+  dom.window.close();
+});
+
 test("an update reached from a changed check notifies completion", async () => {
   const { dom, session, requests, click } = setup();
   const notices = [];
