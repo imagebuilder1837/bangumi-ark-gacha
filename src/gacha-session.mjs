@@ -201,9 +201,8 @@ export class GachaSession {
       }
       if (!controller.signal.aborted) {
         this.view.setLoginNotice(null);
-        this.view.notify(
-          `✅ [${this.statusLabels[status]}] ${task.mode === "check" ? "核验" : "全量更新"}完成`,
-        );
+        if (task.mode === "update")
+          this.view.notify(`✅ [${this.statusLabels[status]}] 全量更新完成`);
         if (this.targetStatuses().includes(status)) this.updateResultMessage();
       }
     } catch (error) {

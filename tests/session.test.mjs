@@ -107,6 +107,47 @@ test("all needs five complete statuses; empty counts as complete and publication
   dom.window.close();
 });
 
+test("a matching check completes silently; only an actual update notifies", async () => {
+  const { dom, session, requests, click } = setup();
+  const notices = [];
+  const notify = session.view.notify.bind(session.view);
+  session.view.notify = (message) => {
+    notices.push(message);
+    notify(message);
+  };
+  session.storage.commitStatus("wish", [], meta);
+  click(".ark-gacha-launcher");
+  await flush();
+  requests[0].resolve(page([]));
+  await flush();
+  assert.equal(requests.length, 1, "a matching check needs no full fetch");
+  assert.deepEqual(notices, [], "a matching check should not notify");
+  dom.window.close();
+});
+
+test("an update reached from a changed check notifies completion", async () => {
+  const { dom, session, requests, click } = setup();
+  const notices = [];
+  const notify = session.view.notify.bind(session.view);
+  session.view.notify = (message) => {
+    notices.push(message);
+    notify(message);
+  };
+  session.storage.commitStatus("wish", [], meta);
+  click(".ark-gacha-launcher");
+  await flush();
+  requests[0].resolve(page([item(1)]));
+  await flush();
+  requests[1].resolve(page([item(1)]));
+  await flush();
+  assert.deepEqual(
+    notices,
+    ["✅ [想看] 全量更新完成"],
+    "an actual update should notify completion",
+  );
+  dom.window.close();
+});
+
 test("manual refresh reuses a covering update instead of replacing it", async () => {
   const { dom, session, requests, click } = setup({ ignoreAbort: true });
   session.storage.commitStatus("wish", [item(1), item(2), item(3)], meta);
