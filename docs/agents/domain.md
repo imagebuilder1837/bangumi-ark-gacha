@@ -1,9 +1,9 @@
 # Domain Docs
 
-This repository uses a single-context layout: `CONTEXT.md` at the repository
+This repository uses a single-context layout: `GLOSSARY.md` at the repository
 root and ADRs under `docs/adr/`.
 
-Before exploring a domain area, read the root `CONTEXT.md` and relevant ADRs
+Before exploring a domain area, read the root `GLOSSARY.md` and relevant ADRs
 when they exist. If they do not exist, proceed without creating them upfront;
 domain-modeling creates them when terms or decisions are resolved.
 
