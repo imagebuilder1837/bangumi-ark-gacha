@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { setup, flush, empty } from "./support/session.mjs";
-import { STATUS_IDS } from "../src/shared.mjs";
+import { STATUS_IDS, firstPageFingerprint } from "../src/shared.mjs";
+import { controlledDatabase } from "./support/storage.mjs";
 
 const item = (id, title = `条目${id}`) => ({
   id: String(id),
@@ -107,6 +108,92 @@ test("all needs five complete statuses; empty counts as complete and publication
   dom.window.close();
 });
 
+test("a changed comparable page count updates an unchanged first page without fetching it again", async () => {
+  const { dom, session, requests, click } = setup();
+  await session.storage.commitStatus("wish", [item(1)], {
+    fingerprint: firstPageFingerprint([item(1)]),
+    totalPages: 1,
+    reliableTotalPages: 1,
+  });
+  click(".ark-gacha-launcher");
+  await flush();
+  requests[0].resolve(page([item(1)], 2));
+  await flush();
+  assert.equal(requests[1].page, 2);
+  requests[1].resolve(page([item(2)], 2));
+  await flush();
+  assert.deepEqual(
+    session.pool.map(({ id }) => id),
+    ["1", "2"],
+  );
+  assert.equal(requests.length, 2);
+  dom.window.close();
+});
+
+test("a contradictory first-page check does not silently mark a legacy cache as synced", async () => {
+  const { dom, session, requests, click } = setup();
+  await session.storage.commitStatus("wish", [], meta);
+  click(".ark-gacha-launcher");
+  await flush();
+  requests[0].resolve(page([], 0));
+  await flush();
+  assert.equal(document.querySelector("#ark-gacha-confirm").hidden, false);
+  click(".ark-gacha-mask");
+  click(".ark-gacha-launcher");
+  await flush();
+  assert.equal(requests.length, 2);
+  dom.window.close();
+});
+
+test("database failure still allows a complete network collection to be drawn", async () => {
+  const { indexedDB, state } = controlledDatabase();
+  state.unavailable = true;
+  const { dom, session, requests, click } = setup({ indexedDB });
+  click(".ark-gacha-launcher");
+  await flush();
+  assert.equal(document.querySelector("#ark-gacha-run-3").disabled, true);
+  assert.match(
+    document.querySelector("#ark-gacha-cache-message").textContent,
+    /不可用/,
+  );
+  requests[0].resolve(page([item(1), item(2), item(3)]));
+  await flush();
+  click("#ark-gacha-run-3");
+  await flush();
+  assert.equal(session.complete, true);
+  assert.equal(document.querySelectorAll(".ark-gacha-card").length, 3);
+  state.unavailable = false;
+  click("#ark-gacha-cache-retry");
+  await flush();
+  assert.equal(requests.length, 1);
+  assert.equal(document.querySelector("#ark-gacha-cache-notice").hidden, true);
+  dom.window.close();
+});
+
+test("switching scope during asynchronous cache loading cannot enable the previous scope's pool", async () => {
+  const { dom, session, requests, click } = setup();
+  click(".ark-gacha-launcher");
+  assert.equal(document.querySelector("#ark-gacha-run-3").disabled, true);
+  assert.match(
+    document.querySelector("#ark-gacha-result").textContent,
+    /读取本地缓存/,
+  );
+  click('[data-status="do"]');
+  await flush();
+  assert.deepEqual(
+    requests.map(({ status }) => status),
+    ["do"],
+  );
+  requests[0].resolve(page([item(1), item(2), item(3)]));
+  await flush();
+  click('[data-status="wish"]');
+  assert.equal(document.querySelector("#ark-gacha-run-3").disabled, true);
+  await flush();
+  assert.equal(session.pool.length, 0);
+  assert.equal(requests[1].status, "wish");
+  dom.window.close();
+});
+
 test("a matching check completes silently; only an actual update notifies", async () => {
   const { dom, session, requests, click } = setup();
   const notices = [];
@@ -168,7 +255,7 @@ test("a completed background update also counts as synced", async () => {
   await flush();
   requests[0].resolve(page([item(4)], 2));
   await flush();
-  requests[1].resolve(page([item(4), item(5)]));
+  requests[1].resolve(page([item(5)], 2));
   await flush();
   click('[data-status="do"]');
   await flush();
@@ -251,7 +338,7 @@ test("an update reached from a changed check notifies completion", async () => {
   await flush();
   requests[0].resolve(page([item(1)]));
   await flush();
-  requests[1].resolve(page([item(1)]));
+  assert.equal(requests.length, 1, "核验结果应直接作为更新的首页");
   await flush();
   assert.deepEqual(
     notices,
@@ -266,13 +353,13 @@ test("manual refresh reuses a covering update instead of replacing it", async ()
   session.storage.commitStatus("wish", [item(1), item(2), item(3)], meta);
   click(".ark-gacha-launcher");
   await flush();
-  requests[0].resolve(page([item(4)]));
+  requests[0].resolve(page([item(4)], 2));
   await flush();
   const old = requests[1];
   click("#ark-gacha-refresh");
   assert.equal(old.signal.aborted, false);
   assert.equal(requests.length, 2);
-  old.resolve(page([item(4), item(5), item(6)]));
+  old.resolve(page([item(5), item(6)], 2));
   await flush();
   assert.deepEqual(
     session.storage.getItems("wish").map(({ id }) => id),
@@ -281,28 +368,36 @@ test("manual refresh reuses a covering update instead of replacing it", async ()
   dom.window.close();
 });
 
-test("storage failure after all pages leaves old draw candidates and offers cache", async () => {
-  const { dom, session, requests, click } = setup();
-  const old = [item(1), item(2), item(3)];
-  session.storage.commitStatus("wish", old, meta);
-  const commit = session.storage.commitStatus.bind(session.storage);
-  session.storage.commitStatus = (status, items, nextMeta) => {
-    if (items.some(({ id }) => id === "4")) throw new Error("quota");
-    commit(status, items, nextMeta);
-  };
+test("a failed save does not block new candidates or scores; retry saves without fetching the collection again", async () => {
+  const { indexedDB, state } = controlledDatabase();
+  const { dom, session, requests, click } = setup({ indexedDB });
+  state.failWrites = true;
   click(".ark-gacha-launcher");
   await flush();
-  requests[0].resolve(page([item(4)]));
-  await flush();
-  requests[1].resolve(page([item(4), item(5), item(6)]));
+  requests[0].resolve(page([item(4), item(5), item(6)]));
   await flush();
   assert.deepEqual(
     session.pool.map(({ id }) => id),
-    ["1", "2", "3"],
+    ["4", "5", "6"],
   );
-  assert.deepEqual(session.storage.getItems("wish"), old);
   assert.equal(document.querySelector("#ark-gacha-run-3").disabled, false);
-  assert.ok(document.querySelector('[data-action="keep"]'));
+  assert.equal(document.querySelector("#ark-gacha-confirm").hidden, true);
+  assert.equal(document.querySelector("#ark-gacha-cache-retry").hidden, false);
+  click("#ark-gacha-run-3");
+  await flush();
+  assert.match(
+    document.querySelector(".ark-gacha-card").textContent,
+    /评分：8.3/,
+  );
+  click(".ark-gacha-mask");
+  click(".ark-gacha-launcher");
+  await flush();
+  assert.equal(requests.length, 1);
+  state.failWrites = false;
+  click("#ark-gacha-cache-retry");
+  await flush();
+  assert.equal(document.querySelector("#ark-gacha-cache-notice").hidden, true);
+  assert.equal(requests.length, 1);
   dom.window.close();
 });
 
@@ -320,8 +415,6 @@ test("a published update cannot change a pending draw; late successful scores ar
   assert.equal(scores.length, 3);
   requests[0].resolve(page([item(4), item(5), item(6)]));
   await flush();
-  requests[1].resolve(page([item(4), item(5), item(6)]));
-  await flush();
   assert.equal(session.pool[0].id, "4");
   click('[data-status="do"]');
   await flush();
@@ -331,6 +424,7 @@ test("a published update cannot change a pending draw; late successful scores ar
       hasScore: true,
       date: "2020-01-01",
       totalEpisodes: 12,
+      isPartial: false,
       resolved: true,
       source: "subject",
     });

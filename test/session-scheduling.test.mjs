@@ -30,18 +30,17 @@ test("known pages run concurrently, failed page cancels siblings and preserves c
   session.storage.commitStatus("wish", [item(1), item(2), item(3)], meta);
   click(".ark-gacha-launcher");
   await flush();
-  await settle(requests, "wish", page([item(4)]));
   await settle(requests, "wish", page([item(4)], 5));
   assert.deepEqual(
-    requests.slice(2).map(({ page }) => page),
+    requests.slice(1).map(({ page }) => page),
     [2, 3, 4, 5],
   );
-  requests[2].reject(new Error("HTTP 403"));
+  requests[1].reject(new Error("HTTP 403"));
   await flush();
-  assert.ok(requests[3].signal.aborted);
-  requests[3].resolve(page([item(5)], 5));
-  requests[4].resolve(page([item(6)], 5));
-  requests[5].resolve(page([item(7)], 5));
+  assert.ok(requests[2].signal.aborted);
+  requests[2].resolve(page([item(5)], 5));
+  requests[3].resolve(page([item(6)], 5));
+  requests[4].resolve(page([item(7)], 5));
   await flush();
   assert.deepEqual(ids(session, "wish"), ["1", "2", "3"]);
   assert.ok(document.querySelector('[data-action="keep"]'));
@@ -53,7 +52,6 @@ test("a repeated nonempty page cannot replace a complete cached collection", asy
   session.storage.commitStatus("wish", [item(9)], meta);
   click(".ark-gacha-launcher");
   await flush();
-  await settle(requests, "wish", page([item(1)]));
   await settle(requests, "wish", page([item(1)], 2));
   await settle(requests, "wish", page([item(1)], 2));
   assert.deepEqual(ids(session, "wish"), ["9"]);
@@ -66,10 +64,9 @@ test("a reported page count beyond the safety limit preserves the old collection
   session.storage.commitStatus("wish", [item(9)], meta);
   click(".ark-gacha-launcher");
   await flush();
-  await settle(requests, "wish", page([item(1)]));
   await settle(requests, "wish", page([item(1)], 10001));
   assert.deepEqual(ids(session, "wish"), ["9"]);
-  assert.equal(requests.length, 2);
+  assert.equal(requests.length, 1);
   assert.ok(document.querySelector('[data-action="keep"]'));
   dom.window.close();
 });
@@ -134,7 +131,6 @@ test("a reliable page count discovered during probing rejects an earlier empty p
   session.storage.commitStatus("wish", [item(9)], meta);
   click(".ark-gacha-launcher");
   await flush();
-  await settle(requests, "wish", page([item(1)]));
   await settle(requests, "wish", page([item(1)], 1, false));
   await settle(requests, "wish", page([item(2)], 4));
   await settle(requests, "wish", page([], 1, false));
@@ -162,12 +158,11 @@ test("a changing reliable page count during probing preserves the old collection
   session.storage.commitStatus("wish", [item(9)], meta);
   click(".ark-gacha-launcher");
   await flush();
-  await settle(requests, "wish", page([item(1)]));
   await settle(requests, "wish", page([item(1)], 1, false));
   await settle(requests, "wish", page([item(2)], 4));
   await settle(requests, "wish", page([item(3)], 5));
   assert.deepEqual(ids(session, "wish"), ["9"]);
-  assert.equal(requests.length, 4);
+  assert.equal(requests.length, 3);
   dom.window.close();
 });
 

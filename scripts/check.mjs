@@ -34,7 +34,7 @@ const files = [
   "src/index.user.js",
   ...(await modules("src")),
   ...(await modules("scripts")),
-  ...(await modules("tests")),
+  ...(await modules("test")),
 ];
 run(path.join(root, "node_modules/.bin/prettier"), ["--check", ...files]);
 for (const file of files) run(process.execPath, ["--check", file]);

@@ -13,7 +13,7 @@ npm run check          # 只读检查格式、语法、测试、版本和产物�
 
 `src/metadata.txt` 是人工维护的 userscript 头部模板，版本号来自 `package.json`；构建将 ESM 源码打包成可读、未压缩的单个 IIFE，安装和更新地址仍指向 `src/index.user.js`。不要直接编辑生成产物；修改模块后运行 `npm run build`，并提交生成产物和锁文件。`npm run check` 不修改文件。
 
-模块职责见 [模块指南](module-guide.md)，具体行为规则见 [规格说明](spec.md)。测试在模块公开接口注入请求、存储、时钟和随机数。
+模块职责见 [模块指南](module-guide.md)，具体行为规则见 [规格说明](spec.md)。`test/` 中的测试在模块公开接口注入请求、存储、时钟和随机数；IndexedDB 行为使用 fake-indexeddb，DOM 行为使用 jsdom。
 
 ## 人工验收待办
 

@@ -154,6 +154,9 @@ const CSS = `
         }
         [data-theme='dark'] .ark-gacha-mini-btn, body[data-theme='dark'] .ark-gacha-mini-btn { background: #3a3a3a; border-color: #555; color: #ccc; }
         .ark-gacha-mini-btn:hover { border-color: #f09199; color: #f09199; }
+        .ark-gacha-cache-notice { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: #a85c63; font-size: 11px; }
+        .ark-gacha-cache-notice[hidden] { display: none; }
+        [data-theme='dark'] .ark-gacha-cache-notice { color: #f0aeb4; }
         .ark-gacha-logs { display: flex; flex-direction: column; max-width: 430px; max-height: 44px; overflow: hidden; color: #aaa; font-size: 10px; line-height: 1.4; }
         .ark-gacha-log-error { color: #e57373; }
         .ark-gacha-confirm {
@@ -257,6 +260,10 @@ export class GachaView {
                             <div class="ark-gacha-progress-wrap" id="ark-gacha-progress-wrap" hidden>
                                 <span class="ark-gacha-progress" id="ark-gacha-progress">准备同步...</span>
                             </div>
+                            <div class="ark-gacha-cache-notice" id="ark-gacha-cache-notice" role="status" hidden>
+                                <span id="ark-gacha-cache-message"></span>
+                                <button type="button" class="ark-gacha-mini-btn" id="ark-gacha-cache-retry" hidden>重试保存缓存</button>
+                            </div>
                             <div class="ark-gacha-logs" id="ark-gacha-logs"></div>
                         </div>
                         <div class="ark-gacha-btn-group">
@@ -276,6 +283,9 @@ export class GachaView {
       progressWrap: mask.querySelector("#ark-gacha-progress-wrap"),
       progress: mask.querySelector("#ark-gacha-progress"),
       logs: mask.querySelector("#ark-gacha-logs"),
+      cacheNotice: mask.querySelector("#ark-gacha-cache-notice"),
+      cacheMessage: mask.querySelector("#ark-gacha-cache-message"),
+      cacheRetry: mask.querySelector("#ark-gacha-cache-retry"),
       confirm: mask.querySelector("#ark-gacha-confirm"),
       run3: mask.querySelector("#ark-gacha-run-3"),
       run10: mask.querySelector("#ark-gacha-run-10"),
@@ -291,6 +301,9 @@ export class GachaView {
     });
     this.ui.refresh.addEventListener("click", () =>
       this.session.forceRefresh(),
+    );
+    this.ui.cacheRetry.addEventListener("click", () =>
+      this.session.retryPersistence(),
     );
     this.ui.run3.addEventListener("click", () => this.session.draw(3));
     this.ui.run10.addEventListener("click", () => this.session.draw(10));
@@ -397,6 +410,17 @@ export class GachaView {
     this.ui.run3.disabled = disabled || this.session.pool.length < 3;
     this.ui.run10.disabled = disabled || this.session.pool.length < 10;
     this.ui.refresh.disabled = false;
+  }
+
+  setCacheNotice({ error, pending, saving, retrying }) {
+    this.ui.cacheNotice.hidden = !error;
+    this.ui.cacheMessage.textContent = !error
+      ? ""
+      : pending
+        ? `缓存未能保存，已获取的完整数据仍可在本页使用：${error.message}`
+        : `本地缓存暂不可用：${error.message}；不影响网络获取。`;
+    this.ui.cacheRetry.hidden = !error;
+    this.ui.cacheRetry.disabled = !!retrying || !!saving;
   }
 
   setProgressVisible(visible) {

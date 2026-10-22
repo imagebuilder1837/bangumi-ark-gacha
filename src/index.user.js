@@ -106,6 +106,34 @@
     };
   }
 
+  const SCORE_TTL_MS = 72 * 60 * 60 * 1000;
+  const SUBJECT_CACHE_VERSION = 3;
+
+  function validCachedSubject(info, subjectId, now) {
+    return (
+      !!info &&
+      info.version === SUBJECT_CACHE_VERSION &&
+      info.resolved === true &&
+      info.subjectId === String(subjectId) &&
+      typeof info.hasScore === "boolean" &&
+      (info.hasScore
+        ? typeof info.score === "number" &&
+          Number.isFinite(info.score) &&
+          info.score > 0 &&
+          info.score <= 10
+        : info.score === null) &&
+      typeof info.isPartial === "boolean" &&
+      (info.totalEpisodes === null ||
+        (Number.isSafeInteger(info.totalEpisodes) &&
+          info.totalEpisodes >= 0)) &&
+      (info.date === null || validCalendarDate(info.date)) &&
+      Number.isFinite(info.fetchedAt) &&
+      info.fetchedAt >= 0 &&
+      now >= info.fetchedAt &&
+      now - info.fetchedAt < SCORE_TTL_MS
+    );
+  }
+
   const STORAGE_PREFIX = "bangumi-ark-gacha";
 
   function validItems(items) {
@@ -128,58 +156,190 @@
       typeof meta === "object" &&
       typeof meta.fingerprint === "string" &&
       Number.isInteger(meta.totalPages) &&
-      meta.totalPages >= 1
+      meta.totalPages >= 1 &&
+      (meta.version === undefined ||
+        (Number.isInteger(meta.version) &&
+          meta.version >= 1 &&
+          meta.version <= 2))
     );
+  }
+  function parseJson(raw) {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  function environmentStorage(name) {
+    try {
+      return globalThis[name];
+    } catch {
+      return null;
+    }
+  }
+  function validRecord(record) {
+    return validItems(record?.items) && validMeta(record?.meta);
   }
 
   class GachaStorage {
-    constructor(userId, subjectType, storage = localStorage) {
-      this.storage = storage;
+    constructor(
+      userId,
+      subjectType,
+      {
+        indexedDB = environmentStorage("indexedDB"),
+        legacy = environmentStorage("localStorage"),
+        now = Date.now,
+      } = {},
+    ) {
+      this.indexedDB = indexedDB;
+      this.legacy = legacy;
+      this.now = now;
+      this.subjects = new Map();
       this.userId = String(userId);
       this.subjectType = String(subjectType);
-    }
-    listKey(status) {
-      return `${STORAGE_PREFIX}:list:${this.userId}:${this.subjectType}:${status}`;
-    }
-    metaKey(status) {
-      return `${STORAGE_PREFIX}:meta:${this.userId}:${this.subjectType}:${status}`;
+      this.records = new Map();
+      this.loading = new Map();
+      this.pending = new Map();
+      this.error = null;
+      this.listeners = new Set();
+      this.writes = new Map();
+      this.saving = 0;
     }
     recordKey(status) {
       return `${STORAGE_PREFIX}:record:${this.userId}:${this.subjectType}:${status}`;
     }
-    subjectKey(subjectId) {
-      return `${STORAGE_PREFIX}:subject:${subjectId}`;
+    openDatabase() {
+      if (!this.connection)
+        this.connection = new Promise((resolve, reject) => {
+          let settled = false;
+          const fail = (error) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            reject(error);
+          };
+          const timer = setTimeout(
+            () => fail(new Error("打开缓存超时，可重试保存")),
+            3000,
+          );
+          let request;
+          try {
+            request = this.indexedDB.open(STORAGE_PREFIX, 1);
+          } catch (error) {
+            fail(error);
+            return;
+          }
+          request.onupgradeneeded = () => {
+            if (settled) {
+              request.transaction.abort();
+              return;
+            }
+            const db = request.result;
+            db.createObjectStore("collections");
+            db.createObjectStore("subjects");
+          };
+          request.onblocked = () =>
+            fail(new Error("缓存升级被其他标签页阻塞，请关闭旧标签页后重试"));
+          request.onerror = () => fail(request.error);
+          request.onsuccess = () => {
+            const db = request.result;
+            if (settled) {
+              db.close();
+              return;
+            }
+            settled = true;
+            clearTimeout(timer);
+            const closed = (message) => {
+              db.close();
+              this.error = new Error(message);
+              this.emit();
+            };
+            db.onversionchange = () =>
+              closed("缓存已在其他标签页升级，请刷新页面");
+            db.onclose = () => closed("缓存连接已关闭，可重试保存");
+            resolve(db);
+          };
+        });
+      return this.connection;
     }
-    readJson(key, fallback) {
+    async transaction(storeName, mode, work) {
+      const db = await this.openDatabase();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(storeName, mode);
+        let result;
+        const timer = setTimeout(() => {
+          try {
+            tx.abort();
+          } catch {
+            /* already finished */
+          }
+          reject(new Error("缓存读写超时，可重试保存"));
+        }, 3000);
+        // A successful request is not a committed transaction.
+        tx.oncomplete = () => {
+          clearTimeout(timer);
+          resolve(result);
+        };
+        tx.onabort = () => {
+          clearTimeout(timer);
+          reject(tx.error || new Error("缓存事务已取消"));
+        };
+        try {
+          work(tx.objectStore(storeName), (value) => {
+            result = value;
+          });
+        } catch (error) {
+          clearTimeout(timer);
+          try {
+            tx.abort();
+          } catch {
+            /* already finished */
+          }
+          reject(error);
+        }
+      });
+    }
+    loadStatuses(statuses) {
+      return Promise.all(
+        statuses.map((status) => {
+          if (!this.loading.has(status))
+            this.loading.set(status, this.loadStatus(status));
+          return this.loading.get(status);
+        }),
+      );
+    }
+    async loadStatus(status) {
+      if (this.records.has(status)) return;
+      const key = this.recordKey(status);
+      let record = null;
       try {
-        const raw = this.storage.getItem(key);
-        return raw == null ? fallback : JSON.parse(raw);
-      } catch {
-        return fallback;
+        record = await this.transaction(
+          "collections",
+          "readonly",
+          (store, done) => {
+            const request = store.get(key);
+            request.onsuccess = () => done(request.result);
+          },
+        );
+      } catch (error) {
+        this.error = error;
+        this.emit();
       }
-    }
-    writeJson(key, value) {
-      this.storage.setItem(key, JSON.stringify(value));
+      if (this.records.has(status)) return;
+      if (!validRecord(record)) {
+        const legacy = this.legacyCollection(key);
+        record = legacy.value;
+        if (record)
+          void this.save("collections", key, record, {
+            onlyMissing: true,
+            sources: legacy.sources,
+          });
+      }
+      if (!this.records.has(status))
+        this.records.set(status, validRecord(record) ? record : null);
     }
     getStatus(status) {
-      if (!STATUS_IDS.includes(status)) return null;
-      const record = this.readJson(this.recordKey(status), null);
-      if (record !== null) {
-        return validItems(record?.items) && validMeta(record?.meta)
-          ? record
-          : null;
-      }
-      // Old installations stored list and metadata separately. Only migrate a complete pair.
-      const items = this.readJson(this.listKey(status), null);
-      const meta = this.readJson(this.metaKey(status), null);
-      if (!validItems(items) || !validMeta(meta)) return null;
-      const migrated = { items: uniqueItems(items), meta };
-      try {
-        this.writeJson(this.recordKey(status), migrated);
-      } catch {
-        /* retry on next read */
-      }
-      return migrated;
+      return this.records.get(status) || null;
     }
     getItems(status) {
       return this.getStatus(status)?.items || [];
@@ -187,29 +347,290 @@
     getMeta(status) {
       return this.getStatus(status)?.meta || null;
     }
-    getSubjectMeta(subjectId) {
-      const meta = this.readJson(this.subjectKey(subjectId), null);
-      return meta && typeof meta === "object" ? meta : null;
-    }
-    saveSubjectMeta(subjectId, meta) {
-      try {
-        this.writeJson(this.subjectKey(subjectId), meta);
-      } catch (error) {
-        console.warn("[Bangumi Ark Gacha] 评分缓存写入失败", error);
-      }
-    }
-    commitStatus(status, items, meta) {
+    async commitStatus(status, items, meta) {
       if (
         !STATUS_IDS.includes(status) ||
         !validItems(items) ||
         !validMeta(meta)
       )
         throw new Error("收藏缓存数据无效");
-      // A single key is the publication point; an unsuccessful setItem leaves the old record intact.
-      this.writeJson(this.recordKey(status), {
-        items: uniqueItems(items),
-        meta,
+      const record = { items: uniqueItems(items), meta };
+      // Full network data is usable even when persistence is unavailable.
+      this.records.set(status, record);
+      return this.save("collections", this.recordKey(status), record);
+    }
+    getSubjectMeta(subjectId) {
+      const value = this.subjects.get(String(subjectId));
+      return validCachedSubject(value, subjectId, this.now()) ? value : null;
+    }
+    async loadSubject(subjectId) {
+      subjectId = String(subjectId);
+      if (this.subjects.has(subjectId)) return this.getSubjectMeta(subjectId);
+      const key = `${STORAGE_PREFIX}:subject:${subjectId}`;
+      let value;
+      try {
+        value = await this.transaction(
+          "subjects",
+          "readonly",
+          (store, done) => {
+            const request = store.get(key);
+            request.onsuccess = () => done(request.result);
+          },
+        );
+      } catch (error) {
+        this.error = error;
+        this.emit();
+      }
+      if (this.subjects.has(subjectId)) return this.getSubjectMeta(subjectId);
+      if (!validCachedSubject(value, subjectId, this.now())) {
+        const raw = this.readLegacy(key);
+        value = parseJson(raw);
+        if (validCachedSubject(value, subjectId, this.now()))
+          void this.save("subjects", key, value, {
+            onlyMissing: true,
+            sources: [[key, raw]],
+          });
+      }
+      if (!this.subjects.has(subjectId)) this.subjects.set(subjectId, value);
+      return this.getSubjectMeta(subjectId);
+    }
+    saveSubjectMeta(subjectId, value) {
+      this.subjects.set(String(subjectId), value);
+      return this.save(
+        "subjects",
+        `${STORAGE_PREFIX}:subject:${subjectId}`,
+        value,
+      );
+    }
+    persistenceState() {
+      return {
+        pending: this.pending.size > 0,
+        error: this.error,
+        saving: this.saving > 0,
+      };
+    }
+    legacyCollection(key) {
+      const keys = [
+        key,
+        key.replace(":record:", ":list:"),
+        key.replace(":record:", ":meta:"),
+      ];
+      let sources = keys.map((key) => [key, this.readLegacy(key)]);
+      const record = parseJson(sources[0][1]);
+      const pair = {
+        items: parseJson(sources[1][1]),
+        meta: parseJson(sources[2][1]),
+      };
+      // Preserve unknown representations without suppressing a usable companion.
+      sources = sources.filter((_, index) =>
+        index === 0 ? !(record?.meta?.version > 2) : !(pair.meta?.version > 2),
+      );
+      const value = validRecord(record)
+        ? record
+        : validRecord(pair)
+          ? pair
+          : null;
+      return {
+        value: value ? { ...value, items: uniqueItems(value.items) } : null,
+        sources,
+      };
+    }
+    readLegacy(key) {
+      try {
+        return this.legacy?.getItem(key) ?? null;
+      } catch (error) {
+        console.warn("[Bangumi Ark Gacha] 旧缓存读取失败", error);
+        return null;
+      }
+    }
+    subscribe(listener) {
+      this.listeners.add(listener);
+      return () => this.listeners.delete(listener);
+    }
+    emit() {
+      for (const listener of this.listeners) listener(this.persistenceState());
+    }
+    removeSources(sources) {
+      for (const [key, raw] of sources) {
+        try {
+          if (raw !== null && this.legacy?.getItem(key) === raw)
+            this.legacy.removeItem(key);
+        } catch (error) {
+          console.warn("[Bangumi Ark Gacha] 旧缓存清理失败", error);
+        }
+      }
+    }
+    async save(
+      storeName,
+      key,
+      value,
+      { onlyMissing = false, sources = [] } = {},
+    ) {
+      const previous = this.pending.get(key);
+      // Migration must never displace a newer network result awaiting persistence.
+      if (onlyMissing && previous) {
+        previous.sources.push(...sources);
+        return this.writes.get(key) || false;
+      }
+      sources = [...(previous?.sources || []), ...sources];
+      const entry = { storeName, key, value, onlyMissing, sources };
+      this.pending.set(key, entry);
+      const previousWrite = this.writes.get(key);
+      const write = this.persist(entry, previousWrite);
+      this.writes.set(key, write);
+      write.finally(() => {
+        if (this.writes.get(key) === write) this.writes.delete(key);
       });
+      return write;
+    }
+    async persist(entry, previousWrite) {
+      const { storeName, key, value, onlyMissing, sources } = entry;
+      this.saving++;
+      this.emit();
+      try {
+        await previousWrite;
+        if (this.pending.get(key) !== entry) return true;
+        await this.transaction(storeName, "readwrite", (store) => {
+          if (!onlyMissing) store.put(value, key);
+          else {
+            const request = store.get(key);
+            request.onsuccess = () => {
+              if (
+                !(storeName === "collections"
+                  ? validRecord(request.result)
+                  : validCachedSubject(
+                      request.result,
+                      value.subjectId,
+                      this.now(),
+                    ))
+              )
+                store.put(value, key);
+            };
+          }
+        });
+        this.removeSources(sources);
+        if (this.pending.get(key) === entry) this.pending.delete(key);
+        if (!this.pending.size) this.error = null;
+        return true;
+      } catch (error) {
+        this.error = error;
+        return false;
+      } finally {
+        this.saving--;
+        this.emit();
+      }
+    }
+    maintain() {
+      if (!this.maintenance) this.maintenance = this.runMaintenance();
+      return this.maintenance;
+    }
+    async runMaintenance() {
+      const yieldTask = () => new Promise((resolve) => setTimeout(resolve, 0));
+      try {
+        await yieldTask();
+        const groups = new Set();
+        for (let i = 0; i < (this.legacy?.length || 0); i++) {
+          const key = this.legacy.key(i);
+          const match = key?.match(
+            /^bangumi-ark-gacha:(record|list|meta):([^:]+):(anime|book|game|real|music):(wish|do|on_hold|collect|dropped)$/,
+          );
+          if (match)
+            groups.add(
+              `${STORAGE_PREFIX}:record:${match[2]}:${match[3]}:${match[4]}`,
+            );
+          else if (/^bangumi-ark-gacha:subject:\d+$/.test(key)) groups.add(key);
+        }
+        let processed = 0;
+        for (const key of groups) {
+          if (key.startsWith(`${STORAGE_PREFIX}:subject:`)) {
+            const raw = this.legacy.getItem(key);
+            const value = parseJson(raw);
+            if (validCachedSubject(value, key.split(":").at(-1), this.now()))
+              await this.save("subjects", key, value, {
+                onlyMissing: true,
+                sources: [[key, raw]],
+              });
+            else if (!(value?.version > SUBJECT_CACHE_VERSION))
+              this.removeSources([[key, raw]]);
+          } else {
+            const { value, sources } = this.legacyCollection(key);
+            if (value)
+              await this.save("collections", key, value, {
+                onlyMissing: true,
+                sources,
+              });
+            else this.removeSources(sources);
+          }
+          if (++processed % 25 === 0) await yieldTask();
+        }
+        // Short transactions re-read each record before deleting; refreshed scores survive.
+        const cutoff = this.now() - SCORE_TTL_MS;
+        let after = null;
+        do {
+          after = await this.transaction(
+            "subjects",
+            "readwrite",
+            (store, done) => {
+              let count = 0;
+              const request = store.openCursor();
+              request.onsuccess = () => {
+                const cursor = request.result;
+                if (!cursor) {
+                  done(null);
+                  return;
+                }
+                if (after !== null && cursor.key <= after) {
+                  if (cursor.key < after) cursor.continue(after);
+                  else cursor.continue();
+                  return;
+                }
+                const fetchedAt = cursor.value?.fetchedAt;
+                if (
+                  !(cursor.value?.version > SUBJECT_CACHE_VERSION) &&
+                  Number.isFinite(fetchedAt) &&
+                  fetchedAt >= 0 &&
+                  fetchedAt <= cutoff
+                )
+                  cursor.delete();
+                if (++count === 50) done(cursor.key);
+                else cursor.continue();
+              };
+            },
+          );
+          if (after !== null) await yieldTask();
+        } while (after !== null);
+        return true;
+      } catch (error) {
+        console.warn("[Bangumi Ark Gacha] 缓存维护失败", error);
+        return false;
+      }
+    }
+    async retryPersistence() {
+      await Promise.all([...this.writes.values()]);
+      if (this.error) {
+        this.connection?.then(
+          (db) => db.close(),
+          () => {},
+        );
+        this.connection = null;
+      }
+      const entries = [...this.pending.values()];
+      const results = await Promise.all(
+        entries.map((entry) => {
+          const { storeName, key, value, ...options } = entry;
+          if (this.pending.get(key) !== entry) return true;
+          this.pending.delete(key);
+          return this.save(storeName, key, value, options);
+        }),
+      );
+      try {
+        await this.openDatabase();
+        if (!this.pending.size) this.error = null;
+      } catch (error) {
+        this.error = error;
+      }
+      this.emit();
+      return results.every(Boolean) && !this.error;
     }
   }
 
@@ -320,7 +741,18 @@
       return { date: null, isPartial: false };
     }
 
-    subjectInfoFromDocument(doc) {
+    subjectInfoFromDocument(doc, subjectId) {
+      const title = doc.querySelector("#headerSubject h1 a[href]");
+      if (
+        !title?.textContent.trim() ||
+        subjectIdFromLink(title.getAttribute("href")) !== String(subjectId)
+      ) {
+        if (doc.querySelector('form[action*="login"]'))
+          throw Object.assign(new Error("请先登录 Bangumi"), {
+            code: "LOGIN_REQUIRED",
+          });
+        throw new Error("条目页结构无效，无法获取评分");
+      }
       const rawDate = this.extractDateFromDocument(doc);
       const normalizedDate = this.normalizeDate(rawDate);
       const score = this.extractScore(doc);
@@ -495,6 +927,7 @@
               browser,
             ),
           ),
+          subjectId,
         );
       },
     };
@@ -590,26 +1023,6 @@
     }
   }
 
-  const SCORE_TTL_MS = 72 * 60 * 60 * 1000;
-  const SUBJECT_CACHE_VERSION = 3;
-  function validSubjectInfo(info) {
-    if (
-      typeof info.hasScore !== "boolean" ||
-      (info.hasScore
-        ? typeof info.score !== "number" ||
-          !Number.isFinite(info.score) ||
-          info.score <= 0 ||
-          info.score > 10
-        : info.score !== null) ||
-      typeof info.isPartial !== "boolean" ||
-      (info.totalEpisodes !== null &&
-        (!Number.isSafeInteger(info.totalEpisodes) ||
-          info.totalEpisodes < 0)) ||
-      (info.date !== null && !validCalendarDate(info.date))
-    )
-      return false;
-    return true;
-  }
   class DrawEngine {
     constructor({
       storage,
@@ -620,24 +1033,8 @@
     }) {
       Object.assign(this, { storage, client, subjectType, now, random });
     }
-    getCachedSubject(subjectId) {
-      const cached = this.storage.getSubjectMeta(subjectId);
-      if (
-        !cached ||
-        cached.version !== SUBJECT_CACHE_VERSION ||
-        cached.resolved !== true ||
-        cached.subjectId !== String(subjectId) ||
-        !validSubjectInfo(cached) ||
-        !Number.isFinite(cached.fetchedAt) ||
-        cached.fetchedAt < 0
-      )
-        return null;
-      const age = this.now() - cached.fetchedAt;
-      return age >= 0 && age < SCORE_TTL_MS ? cached : null;
-    }
-
     async getSubjectInfo(subjectId, signal) {
-      const cached = this.getCachedSubject(subjectId);
+      const cached = await this.storage.loadSubject(subjectId);
       if (cached) return cached;
 
       try {
@@ -889,6 +1286,9 @@
         }
         [data-theme='dark'] .ark-gacha-mini-btn, body[data-theme='dark'] .ark-gacha-mini-btn { background: #3a3a3a; border-color: #555; color: #ccc; }
         .ark-gacha-mini-btn:hover { border-color: #f09199; color: #f09199; }
+        .ark-gacha-cache-notice { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: #a85c63; font-size: 11px; }
+        .ark-gacha-cache-notice[hidden] { display: none; }
+        [data-theme='dark'] .ark-gacha-cache-notice { color: #f0aeb4; }
         .ark-gacha-logs { display: flex; flex-direction: column; max-width: 430px; max-height: 44px; overflow: hidden; color: #aaa; font-size: 10px; line-height: 1.4; }
         .ark-gacha-log-error { color: #e57373; }
         .ark-gacha-confirm {
@@ -992,6 +1392,10 @@
                             <div class="ark-gacha-progress-wrap" id="ark-gacha-progress-wrap" hidden>
                                 <span class="ark-gacha-progress" id="ark-gacha-progress">准备同步...</span>
                             </div>
+                            <div class="ark-gacha-cache-notice" id="ark-gacha-cache-notice" role="status" hidden>
+                                <span id="ark-gacha-cache-message"></span>
+                                <button type="button" class="ark-gacha-mini-btn" id="ark-gacha-cache-retry" hidden>重试保存缓存</button>
+                            </div>
                             <div class="ark-gacha-logs" id="ark-gacha-logs"></div>
                         </div>
                         <div class="ark-gacha-btn-group">
@@ -1011,6 +1415,9 @@
         progressWrap: mask.querySelector("#ark-gacha-progress-wrap"),
         progress: mask.querySelector("#ark-gacha-progress"),
         logs: mask.querySelector("#ark-gacha-logs"),
+        cacheNotice: mask.querySelector("#ark-gacha-cache-notice"),
+        cacheMessage: mask.querySelector("#ark-gacha-cache-message"),
+        cacheRetry: mask.querySelector("#ark-gacha-cache-retry"),
         confirm: mask.querySelector("#ark-gacha-confirm"),
         run3: mask.querySelector("#ark-gacha-run-3"),
         run10: mask.querySelector("#ark-gacha-run-10"),
@@ -1026,6 +1433,9 @@
       });
       this.ui.refresh.addEventListener("click", () =>
         this.session.forceRefresh(),
+      );
+      this.ui.cacheRetry.addEventListener("click", () =>
+        this.session.retryPersistence(),
       );
       this.ui.run3.addEventListener("click", () => this.session.draw(3));
       this.ui.run10.addEventListener("click", () => this.session.draw(10));
@@ -1132,6 +1542,17 @@
       this.ui.run3.disabled = disabled || this.session.pool.length < 3;
       this.ui.run10.disabled = disabled || this.session.pool.length < 10;
       this.ui.refresh.disabled = false;
+    }
+
+    setCacheNotice({ error, pending, saving, retrying }) {
+      this.ui.cacheNotice.hidden = !error;
+      this.ui.cacheMessage.textContent = !error
+        ? ""
+        : pending
+          ? `缓存未能保存，已获取的完整数据仍可在本页使用：${error.message}`
+          : `本地缓存暂不可用：${error.message}；不影响网络获取。`;
+      this.ui.cacheRetry.hidden = !error;
+      this.ui.cacheRetry.disabled = !!retrying || !!saving;
     }
 
     setProgressVisible(visible) {
@@ -1260,6 +1681,18 @@
   }
 
   const MAX_FALLBACK_PAGES = 10000;
+  function validateFirstPage({ items, pageInfo }) {
+    const { totalPages, reliable, currentPage } = pageInfo;
+    if (
+      !Number.isSafeInteger(totalPages) ||
+      totalPages < 1 ||
+      (reliable &&
+        (totalPages > MAX_FALLBACK_PAGES ||
+          (currentPage != null && currentPage !== 1) ||
+          (!items.length && totalPages !== 1)))
+    )
+      throw new Error("分页数据无效或矛盾");
+  }
   function sleep(ms, browser) {
     return new Promise((resolve) => browser.setTimeout(resolve, ms));
   }
@@ -1280,7 +1713,8 @@
       this.subjectType = appRoute.subjectType;
       this.currentStatus = appRoute.status;
       this.statusLabels = statusLabelsFor(this.subjectType);
-      this.storage = storage || new GachaStorage(this.userId, this.subjectType);
+      this.storage =
+        storage || new GachaStorage(this.userId, this.subjectType, { now });
       this.client = client || createBangumiClient({ ...appRoute, browser });
       this.scheduler = new PageScheduler(this.client);
       this.now = now;
@@ -1302,6 +1736,7 @@
       this.synced = new Set();
       this.progressVersion = 0;
       this.view = createView(this);
+      this.storage.subscribe(() => this.renderCacheNotice());
     }
 
     targetStatuses() {
@@ -1340,12 +1775,44 @@
       this.loaded = false;
       this.loadView();
     }
-    loadView() {
+    async loadView() {
       this.loaded = true;
+      this.cacheLoading = true;
+      this.refreshRequested = false;
+      const selection = this.selectionId;
+      const statuses = this.targetStatuses();
       this.view.hideConfirm();
+      this.complete = false;
+      this.pool = [];
+      this.view.updateInfo();
+      this.view.updateButtons();
+      if (this.view.hasResultMessage())
+        this.view.setResultMessage("读取本地缓存中...");
+      await this.storage.loadStatuses(statuses);
+      if (selection !== this.selectionId) return;
+      this.cacheLoading = false;
       this.refreshPool();
       this.updateResultMessage();
-      this.acquire(false);
+      this.renderCacheNotice();
+      this.acquire(this.refreshRequested);
+      void this.storage.maintain();
+    }
+    renderCacheNotice() {
+      this.view.setCacheNotice({
+        ...this.storage.persistenceState(),
+        retrying: this.retrying,
+      });
+    }
+    async retryPersistence() {
+      if (this.retrying) return;
+      this.retrying = true;
+      this.renderCacheNotice();
+      try {
+        await this.storage.retryPersistence();
+      } finally {
+        this.retrying = false;
+        this.renderCacheNotice();
+      }
     }
     updateResultMessage() {
       if (!this.view.hasResultMessage()) return;
@@ -1435,18 +1902,27 @@
             controller.signal,
           );
           if (controller.signal.aborted) return;
+          validateFirstPage(remote);
           this.progress(task, 1, 1, true);
           const meta = this.storage.getMeta(status);
-          if (!meta || firstPageFingerprint(remote.items) !== meta.fingerprint)
+          if (
+            !meta ||
+            firstPageFingerprint(remote.items) !== meta.fingerprint ||
+            (remote.pageInfo.reliable &&
+              Number.isSafeInteger(meta.reliableTotalPages) &&
+              remote.pageInfo.totalPages !== meta.reliableTotalPages)
+          ) {
             task.mode = "update";
-          else this.synced.add(status);
+            task.firstPage = remote;
+          } else this.synced.add(status);
         }
         if (task.mode === "update") {
           const result = await this.fetchAllStatus(task);
           if (controller.signal.aborted) return;
-          this.storage.commitStatus(status, result.items, {
+          const saving = this.storage.commitStatus(status, result.items, {
             version: 2,
             totalPages: result.totalPages,
+            reliableTotalPages: result.reliableTotalPages,
             fingerprint: result.snapshot.fingerprint,
             firstPage: result.snapshot.items,
             checkedAt: this.now(),
@@ -1454,6 +1930,8 @@
           });
           this.synced.add(status);
           this.refreshPool();
+          this.updateResultMessage();
+          await saving;
         }
         if (!controller.signal.aborted) {
           this.view.setLoginNotice(null);
@@ -1512,18 +1990,12 @@
       const { status, controller } = task;
       const signal = controller.signal;
       this.progress(task, 0, 1);
-      const first = await this.scheduler.request(status, 1, signal);
+      const first =
+        task.firstPage || (await this.scheduler.request(status, 1, signal));
       if (signal.aborted) return;
       const { totalPages, reliable } = first.pageInfo;
-      if (
-        !Number.isSafeInteger(totalPages) ||
-        totalPages < 1 ||
-        (reliable &&
-          (totalPages > MAX_FALLBACK_PAGES ||
-            (first.pageInfo.currentPage != null &&
-              first.pageInfo.currentPage !== 1)))
-      )
-        throw new Error("分页数据无效");
+      let reliableTotalPages = reliable ? totalPages : null;
+      validateFirstPage(first);
       const signatures = new Set([firstPageFingerprint(first.items)]);
       const pages = new Map([[1, first.items]]);
       const recordPage = (page, items) => {
@@ -1534,8 +2006,6 @@
         pages.set(page, items);
       };
       if (reliable) {
-        if (!first.items.length && totalPages !== 1)
-          throw new Error("分页数据矛盾");
         this.progress(task, 1, totalPages);
         const remaining = Array.from(
           { length: totalPages - 1 },
@@ -1584,6 +2054,7 @@
             )
               throw new Error("分页数据矛盾");
             discoveredTotalPages = reportedTotal;
+            reliableTotalPages = reportedTotal;
           }
           if (!result.items.length && discoveredTotalPages !== null)
             throw new Error("分页数据矛盾");
@@ -1603,12 +2074,14 @@
             .flatMap(([, items]) => items),
         ),
         totalPages: pages.size,
+        reliableTotalPages,
         snapshot: firstPageSnapshot(first.items, this.now),
       };
     }
     forceRefresh() {
       this.view.hideConfirm();
-      this.acquire(true);
+      if (this.cacheLoading) this.refreshRequested = true;
+      else this.acquire(true);
     }
     async draw(count) {
       if (this.busy || !this.complete || this.pool.length < count) return;

@@ -98,7 +98,18 @@ class SubjectParser {
     return { date: null, isPartial: false };
   }
 
-  subjectInfoFromDocument(doc) {
+  subjectInfoFromDocument(doc, subjectId) {
+    const title = doc.querySelector("#headerSubject h1 a[href]");
+    if (
+      !title?.textContent.trim() ||
+      subjectIdFromLink(title.getAttribute("href")) !== String(subjectId)
+    ) {
+      if (doc.querySelector('form[action*="login"]'))
+        throw Object.assign(new Error("请先登录 Bangumi"), {
+          code: "LOGIN_REQUIRED",
+        });
+      throw new Error("条目页结构无效，无法获取评分");
+    }
     const rawDate = this.extractDateFromDocument(doc);
     const normalizedDate = this.normalizeDate(rawDate);
     const score = this.extractScore(doc);
@@ -265,6 +276,7 @@ export function createBangumiClient({
             browser,
           ),
         ),
+        subjectId,
       );
     },
   };

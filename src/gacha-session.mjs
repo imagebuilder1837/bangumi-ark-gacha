@@ -13,6 +13,18 @@ import { GachaView } from "./gacha-view.mjs";
 import { createBrowserAdapter } from "./browser-adapter.mjs";
 
 const MAX_FALLBACK_PAGES = 10000;
+function validateFirstPage({ items, pageInfo }) {
+  const { totalPages, reliable, currentPage } = pageInfo;
+  if (
+    !Number.isSafeInteger(totalPages) ||
+    totalPages < 1 ||
+    (reliable &&
+      (totalPages > MAX_FALLBACK_PAGES ||
+        (currentPage != null && currentPage !== 1) ||
+        (!items.length && totalPages !== 1)))
+  )
+    throw new Error("分页数据无效或矛盾");
+}
 function sleep(ms, browser) {
   return new Promise((resolve) => browser.setTimeout(resolve, ms));
 }
@@ -33,7 +45,8 @@ export class GachaSession {
     this.subjectType = appRoute.subjectType;
     this.currentStatus = appRoute.status;
     this.statusLabels = statusLabelsFor(this.subjectType);
-    this.storage = storage || new GachaStorage(this.userId, this.subjectType);
+    this.storage =
+      storage || new GachaStorage(this.userId, this.subjectType, { now });
     this.client = client || createBangumiClient({ ...appRoute, browser });
     this.scheduler = new PageScheduler(this.client);
     this.now = now;
@@ -55,6 +68,7 @@ export class GachaSession {
     this.synced = new Set();
     this.progressVersion = 0;
     this.view = createView(this);
+    this.storage.subscribe(() => this.renderCacheNotice());
   }
 
   targetStatuses() {
@@ -91,12 +105,44 @@ export class GachaSession {
     this.loaded = false;
     this.loadView();
   }
-  loadView() {
+  async loadView() {
     this.loaded = true;
+    this.cacheLoading = true;
+    this.refreshRequested = false;
+    const selection = this.selectionId;
+    const statuses = this.targetStatuses();
     this.view.hideConfirm();
+    this.complete = false;
+    this.pool = [];
+    this.view.updateInfo();
+    this.view.updateButtons();
+    if (this.view.hasResultMessage())
+      this.view.setResultMessage("读取本地缓存中...");
+    await this.storage.loadStatuses(statuses);
+    if (selection !== this.selectionId) return;
+    this.cacheLoading = false;
     this.refreshPool();
     this.updateResultMessage();
-    this.acquire(false);
+    this.renderCacheNotice();
+    this.acquire(this.refreshRequested);
+    void this.storage.maintain();
+  }
+  renderCacheNotice() {
+    this.view.setCacheNotice({
+      ...this.storage.persistenceState(),
+      retrying: this.retrying,
+    });
+  }
+  async retryPersistence() {
+    if (this.retrying) return;
+    this.retrying = true;
+    this.renderCacheNotice();
+    try {
+      await this.storage.retryPersistence();
+    } finally {
+      this.retrying = false;
+      this.renderCacheNotice();
+    }
   }
   updateResultMessage() {
     if (!this.view.hasResultMessage()) return;
@@ -184,18 +230,27 @@ export class GachaSession {
           controller.signal,
         );
         if (controller.signal.aborted) return;
+        validateFirstPage(remote);
         this.progress(task, 1, 1, true);
         const meta = this.storage.getMeta(status);
-        if (!meta || firstPageFingerprint(remote.items) !== meta.fingerprint)
+        if (
+          !meta ||
+          firstPageFingerprint(remote.items) !== meta.fingerprint ||
+          (remote.pageInfo.reliable &&
+            Number.isSafeInteger(meta.reliableTotalPages) &&
+            remote.pageInfo.totalPages !== meta.reliableTotalPages)
+        ) {
           task.mode = "update";
-        else this.synced.add(status);
+          task.firstPage = remote;
+        } else this.synced.add(status);
       }
       if (task.mode === "update") {
         const result = await this.fetchAllStatus(task);
         if (controller.signal.aborted) return;
-        this.storage.commitStatus(status, result.items, {
+        const saving = this.storage.commitStatus(status, result.items, {
           version: 2,
           totalPages: result.totalPages,
+          reliableTotalPages: result.reliableTotalPages,
           fingerprint: result.snapshot.fingerprint,
           firstPage: result.snapshot.items,
           checkedAt: this.now(),
@@ -203,6 +258,8 @@ export class GachaSession {
         });
         this.synced.add(status);
         this.refreshPool();
+        this.updateResultMessage();
+        await saving;
       }
       if (!controller.signal.aborted) {
         this.view.setLoginNotice(null);
@@ -260,18 +317,12 @@ export class GachaSession {
     const { status, controller } = task;
     const signal = controller.signal;
     this.progress(task, 0, 1);
-    const first = await this.scheduler.request(status, 1, signal);
+    const first =
+      task.firstPage || (await this.scheduler.request(status, 1, signal));
     if (signal.aborted) return;
     const { totalPages, reliable } = first.pageInfo;
-    if (
-      !Number.isSafeInteger(totalPages) ||
-      totalPages < 1 ||
-      (reliable &&
-        (totalPages > MAX_FALLBACK_PAGES ||
-          (first.pageInfo.currentPage != null &&
-            first.pageInfo.currentPage !== 1)))
-    )
-      throw new Error("分页数据无效");
+    let reliableTotalPages = reliable ? totalPages : null;
+    validateFirstPage(first);
     const signatures = new Set([firstPageFingerprint(first.items)]);
     const pages = new Map([[1, first.items]]);
     const recordPage = (page, items) => {
@@ -282,8 +333,6 @@ export class GachaSession {
       pages.set(page, items);
     };
     if (reliable) {
-      if (!first.items.length && totalPages !== 1)
-        throw new Error("分页数据矛盾");
       this.progress(task, 1, totalPages);
       const remaining = Array.from({ length: totalPages - 1 }, (_, i) => i + 2);
       await Promise.all(
@@ -329,6 +378,7 @@ export class GachaSession {
           )
             throw new Error("分页数据矛盾");
           discoveredTotalPages = reportedTotal;
+          reliableTotalPages = reportedTotal;
         }
         if (!result.items.length && discoveredTotalPages !== null)
           throw new Error("分页数据矛盾");
@@ -348,12 +398,14 @@ export class GachaSession {
           .flatMap(([, items]) => items),
       ),
       totalPages: pages.size,
+      reliableTotalPages,
       snapshot: firstPageSnapshot(first.items, this.now),
     };
   }
   forceRefresh() {
     this.view.hideConfirm();
-    this.acquire(true);
+    if (this.cacheLoading) this.refreshRequested = true;
+    else this.acquire(true);
   }
   async draw(count) {
     if (this.busy || !this.complete || this.pool.length < count) return;

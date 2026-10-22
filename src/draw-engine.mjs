@@ -1,24 +1,5 @@
-import { subjectIdFromLink, validCalendarDate } from "./shared.mjs";
-
-const SCORE_TTL_MS = 72 * 60 * 60 * 1000;
-const SUBJECT_CACHE_VERSION = 3;
-function validSubjectInfo(info) {
-  if (
-    typeof info.hasScore !== "boolean" ||
-    (info.hasScore
-      ? typeof info.score !== "number" ||
-        !Number.isFinite(info.score) ||
-        info.score <= 0 ||
-        info.score > 10
-      : info.score !== null) ||
-    typeof info.isPartial !== "boolean" ||
-    (info.totalEpisodes !== null &&
-      (!Number.isSafeInteger(info.totalEpisodes) || info.totalEpisodes < 0)) ||
-    (info.date !== null && !validCalendarDate(info.date))
-  )
-    return false;
-  return true;
-}
+import { subjectIdFromLink } from "./shared.mjs";
+import { SUBJECT_CACHE_VERSION } from "./subject-cache-policy.mjs";
 export class DrawEngine {
   constructor({
     storage,
@@ -29,24 +10,8 @@ export class DrawEngine {
   }) {
     Object.assign(this, { storage, client, subjectType, now, random });
   }
-  getCachedSubject(subjectId) {
-    const cached = this.storage.getSubjectMeta(subjectId);
-    if (
-      !cached ||
-      cached.version !== SUBJECT_CACHE_VERSION ||
-      cached.resolved !== true ||
-      cached.subjectId !== String(subjectId) ||
-      !validSubjectInfo(cached) ||
-      !Number.isFinite(cached.fetchedAt) ||
-      cached.fetchedAt < 0
-    )
-      return null;
-    const age = this.now() - cached.fetchedAt;
-    return age >= 0 && age < SCORE_TTL_MS ? cached : null;
-  }
-
   async getSubjectInfo(subjectId, signal) {
-    const cached = this.getCachedSubject(subjectId);
+    const cached = await this.storage.loadSubject(subjectId);
     if (cached) return cached;
 
     try {

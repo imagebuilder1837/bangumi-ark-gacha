@@ -1,7 +1,11 @@
 import { JSDOM } from "jsdom";
+import { IDBFactory } from "fake-indexeddb";
 import { GachaSession } from "../../src/gacha-session.mjs";
 
-export const flush = () => new Promise((resolve) => setImmediate(resolve));
+export async function flush() {
+  for (let i = 0; i < 40; i++)
+    await new Promise((resolve) => setImmediate(resolve));
+}
 export const empty = { items: [], pageInfo: { reliable: true, totalPages: 1 } };
 export function environment() {
   const dom = new JSDOM(
@@ -11,6 +15,8 @@ export function environment() {
   globalThis.window = dom.window;
   globalThis.document = dom.window.document;
   globalThis.localStorage = dom.window.localStorage;
+  globalThis.indexedDB = new IDBFactory();
+  dom.window.indexedDB = globalThis.indexedDB;
   globalThis.DOMParser = dom.window.DOMParser;
   dom.window.requestAnimationFrame = (callback) => {
     callback();
@@ -19,8 +25,9 @@ export function environment() {
   dom.window.cancelAnimationFrame = () => {};
   return dom;
 }
-export function setup({ ignoreAbort = false, browser } = {}) {
+export function setup({ ignoreAbort = false, browser, indexedDB } = {}) {
   const dom = environment();
+  if (indexedDB) globalThis.indexedDB = dom.window.indexedDB = indexedDB;
   const requests = [];
   const client = {
     fetchListPage(status, page, signal) {

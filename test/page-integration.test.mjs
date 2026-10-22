@@ -62,12 +62,38 @@ test("403 and 5xx surface a failure without starting an automatic session retry"
   }
 });
 
+test("an HTTP 200 challenge cannot poison the next draw's score cache", async () => {
+  const dom = environment();
+  let html = "<h1>Verify you are human</h1>";
+  let calls = 0;
+  const client = createBangumiClient({
+    subjectType: "anime",
+    userId: "test",
+    transport: async () => {
+      calls++;
+      return { ok: true, text: async () => html };
+    },
+  });
+  const storage = new GachaStorage("test", "anime");
+  const engine = new DrawEngine({ client, storage, subjectType: "anime" });
+  const candidates = [
+    { id: "42", title: "作品", link: "/subject/42", cover: "" },
+  ];
+  assert.equal((await engine.cards(candidates, 1))[0].info.resolved, false);
+  html =
+    '<div id="headerSubject"><h1><a href="/subject/42">作品</a></h1></div><div class="global_score"><span class="number">8.3</span></div><ul id="infobox"><li>放送开始: 2020-01-01</li><li>话数: 12</li></ul>';
+  assert.equal((await engine.cards(candidates, 1))[0].star, 6);
+  assert.equal((await engine.cards(candidates, 1))[0].star, 6);
+  assert.equal(calls, 2);
+  dom.window.close();
+});
+
 test("real HTML list/score parsing and card interaction use actual selectors", async () => {
   const dom = environment();
   const list =
     '<ul id="browserItemList"><li class="item"><h3><a href="/subject/42">作品名</a></h3><img class="cover" src="/r/100/pic/cover.jpg"></li></ul><div class="p_edge">1 / 2</div>';
   const score =
-    '<div id="ChartWarpper"><div class="global_score"><span class="number">8.3</span></div></div><ul id="infobox"><li>放送开始: 2020-01-01</li><li>话数: 12</li></ul>';
+    '<div id="headerSubject"><h1><a href="/subject/42">作品</a></h1></div><div id="ChartWarpper"><div class="global_score"><span class="number">8.3</span></div></div><ul id="infobox"><li>放送开始: 2020-01-01</li><li>话数: 12</li></ul>';
   const calls = [];
   const client = createBangumiClient({
     subjectType: "anime",

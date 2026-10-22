@@ -6,7 +6,11 @@ import { browser } from "./support/browser.mjs";
 
 test("malformed cached score is fetched again before drawing", async () => {
   const dom = browser();
-  const storage = new GachaStorage("test", "anime", dom.window.localStorage);
+  const storage = new GachaStorage("test", "anime", {
+    indexedDB: null,
+    legacy: dom.window.localStorage,
+    now: () => now,
+  });
   const now = Date.parse("2026-01-01T00:00:00Z");
   storage.saveSubjectMeta("21", {
     version: 3,
@@ -49,7 +53,11 @@ test("malformed cached score is fetched again before drawing", async () => {
 
 test("impossible cached release dates are fetched again", async () => {
   const dom = browser();
-  const storage = new GachaStorage("test", "anime", dom.window.localStorage);
+  const storage = new GachaStorage("test", "anime", {
+    indexedDB: null,
+    legacy: dom.window.localStorage,
+    now: () => now,
+  });
   const now = Date.parse("2026-01-01T00:00:00Z");
   storage.saveSubjectMeta("21", {
     version: 3,
@@ -93,7 +101,11 @@ test("score cache expires exactly 72 hours after its original fetch", async () =
   const dom = browser();
   let now = Date.parse("2026-01-01T00:00:00Z");
   let calls = 0;
-  const storage = new GachaStorage("test", "anime", dom.window.localStorage);
+  const storage = new GachaStorage("test", "anime", {
+    indexedDB: null,
+    legacy: dom.window.localStorage,
+    now: () => now,
+  });
   const client = {
     fetchSubject: async () => {
       calls++;

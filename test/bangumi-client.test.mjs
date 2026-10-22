@@ -11,7 +11,7 @@ test("subject request returns parsed score and release data, not a DOM document"
     transport: async () => ({
       ok: true,
       text: async () =>
-        '<div class="global_score"><span class="number">8.3</span></div><ul id="infobox"><li>放送开始: 2020-01-01</li><li>话数: 12</li></ul>',
+        '<div id="headerSubject"><h1><a href="/subject/42">作品</a></h1></div><div class="global_score"><span class="number">8.3</span></div><ul id="infobox"><li>放送开始: 2020-01-01</li><li>话数: 12</li></ul>',
     }),
   });
   assert.deepEqual(await client.fetchSubject("42"), {
@@ -26,6 +26,35 @@ test("subject request returns parsed score and release data, not a DOM document"
   dom.window.close();
 });
 
+test("HTTP 200 login, challenge and wrong-subject pages cannot become successful score results", async () => {
+  const dom = browser();
+  for (const html of [
+    '<form action="/login">登录</form>',
+    "<h1>Verify you are human</h1>",
+    '<div id="headerSubject"><h1><a href="/subject/99">另一条目</a></h1></div>',
+  ]) {
+    const client = createBangumiClient({
+      subjectType: "anime",
+      userId: "test",
+      transport: async () => ({ ok: true, text: async () => html }),
+    });
+    await assert.rejects(client.fetchSubject("42"), /条目页|登录/);
+  }
+  const client = createBangumiClient({
+    subjectType: "anime",
+    userId: "test",
+    transport: async () => ({
+      ok: true,
+      text: async () =>
+        '<div id="headerSubject"><h1><a href="/subject/42">合法但无评分</a></h1></div><a href="/login">登录</a>',
+    }),
+  });
+  const info = await client.fetchSubject("42");
+  assert.equal(info.resolved, true);
+  assert.equal(info.hasScore, false);
+  dom.window.close();
+});
+
 test("invalid partial release dates are not cached as valid dates", async () => {
   const dom = browser();
   for (const rawDate of ["2025-13", "2025年13月"]) {
@@ -34,7 +63,8 @@ test("invalid partial release dates are not cached as valid dates", async () => 
       userId: "test",
       transport: async () => ({
         ok: true,
-        text: async () => `<ul id="infobox"><li>放送开始: ${rawDate}</li></ul>`,
+        text: async () =>
+          `<div id="headerSubject"><h1><a href="/subject/42">作品</a></h1></div><ul id="infobox"><li>放送开始: ${rawDate}</li></ul>`,
       }),
     });
     const info = await client.fetchSubject("42");
