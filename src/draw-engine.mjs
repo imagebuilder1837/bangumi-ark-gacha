@@ -69,17 +69,27 @@ export class DrawEngine {
     return 1;
   }
 
-  shuffle(items) {
-    const result = [...items];
-    for (let index = result.length - 1; index > 0; index -= 1) {
-      const swapIndex = Math.floor(this.random() * (index + 1));
-      [result[index], result[swapIndex]] = [result[swapIndex], result[index]];
+  sample(items, count) {
+    const n = items.length;
+    const k = Math.min(count, n);
+    const positions = new Map();
+    const selected = [];
+
+    for (let i = 0; i < k; i += 1) {
+      const j = i + Math.floor(this.random() * (n - i));
+      // Unmapped virtual positions still contain their original indices.
+      const picked = positions.get(j) ?? j;
+      const displaced = positions.get(i) ?? i;
+      if (j !== i) positions.set(j, displaced);
+      positions.delete(i);
+      selected.push(items[picked]);
     }
-    return result;
+
+    return selected;
   }
 
   async cards(items, count, signal) {
-    const selected = this.shuffle(items).slice(0, count);
+    const selected = this.sample(items, count);
     return Promise.all(
       selected.map(async (item) => {
         try {

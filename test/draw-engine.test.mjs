@@ -4,6 +4,93 @@ import { GachaStorage } from "../src/collection-cache.mjs";
 import { DrawEngine } from "../src/draw-engine.mjs";
 import { browser } from "./support/browser.mjs";
 
+test("sampling produces every ordered pair equally without changing the pool", () => {
+  const items = Object.freeze(["a", "b", "c"]);
+  const outcomes = new Map();
+  for (let first = 0; first < 3; first++) {
+    for (let second = 0; second < 2; second++) {
+      const values = [(first + 0.5) / 3, (second + 0.5) / 2];
+      const engine = new DrawEngine({ random: () => values.shift() });
+      const selected = engine.sample(items, 2);
+      assert.equal(new Set(selected).size, 2);
+      const key = selected.join("");
+      outcomes.set(key, (outcomes.get(key) ?? 0) + 1);
+    }
+  }
+  assert.deepEqual([...outcomes.keys()].sort(), [
+    "ab",
+    "ac",
+    "ba",
+    "bc",
+    "ca",
+    "cb",
+  ]);
+  assert.ok([...outcomes.values()].every((count) => count === 1));
+});
+
+test("sampling handles empty, zero, singleton and oversized draws", () => {
+  for (const random of [() => 0, () => 1 - Number.EPSILON]) {
+    const engine = new DrawEngine({ random });
+    assert.deepEqual(engine.sample([], 10), []);
+    assert.deepEqual(engine.sample(["a", "b"], 0), []);
+    assert.deepEqual(engine.sample(["a"], 10), ["a"]);
+    const items = Object.freeze(["a", "b", "c", "d"]);
+    const selected = engine.sample(items, 10);
+    assert.deepEqual([...selected].sort(), [...items]);
+  }
+});
+
+test("sampling only reads the requested entries from a large pool", () => {
+  const reads = [];
+  const items = new Proxy(
+    { length: 100000 },
+    {
+      get(target, key) {
+        if (key === "length") return target.length;
+        reads.push(key);
+        return key;
+      },
+    },
+  );
+  let calls = 0;
+  const engine = new DrawEngine({
+    random: () => {
+      calls++;
+      return 1 - Number.EPSILON;
+    },
+  });
+  const selected = engine.sample(items, 3);
+  assert.deepEqual(selected, ["99999", "0", "1"]);
+  assert.deepEqual(reads, selected);
+  assert.equal(calls, 3);
+});
+
+test("cards fetches scores only for sampled items in draw order", async () => {
+  const fetched = [];
+  const engine = new DrawEngine({
+    random: () => 1 - Number.EPSILON,
+    storage: {
+      loadSubject: async () => null,
+      saveSubjectMeta() {},
+    },
+    client: {
+      async fetchSubject(id) {
+        fetched.push(id);
+        return { resolved: true, hasScore: false };
+      },
+    },
+  });
+  const items = Object.freeze(
+    ["1", "2", "3", "4"].map((id) => ({ id, link: `/subject/${id}` })),
+  );
+  const cards = await engine.cards(items, 2);
+  assert.deepEqual(
+    cards.map((card) => card.id),
+    ["4", "1"],
+  );
+  assert.deepEqual(fetched, ["4", "1"]);
+});
+
 test("malformed cached score is fetched again before drawing", async () => {
   const dom = browser();
   const storage = new GachaStorage("test", "anime", {
